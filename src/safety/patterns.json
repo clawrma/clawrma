@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "aws-access-key",
+      "label": "AWS Access Key ID",
+      "pattern": "(?:AKIA|ASIA)[0-9A-Z]{16}"
+    },
+    {
+      "id": "aws-secret-key",
+      "label": "AWS Secret Access Key",
+      "pattern": "(?:AWS|aws)?(?:_|\\s)?SECRET(?:_|\\s)?ACCESS(?:_|\\s)?KEY\\s*[:=]\\s*[A-Za-z0-9/+=]{40}"
+    },
+    {
+      "id": "openai-project-key",
+      "label": "OpenAI Project API Key",
+      "pattern": "\\bsk-proj-[A-Za-z0-9_-]{20,}\\b"
+    },
+    {
+      "id": "openai-admin-key",
+      "label": "OpenAI Admin API Key",
+      "pattern": "\\bsk-admin-[A-Za-z0-9_-]{20,}\\b"
+    },
+    {
+      "id": "anthropic-key",
+      "label": "Anthropic API Key",
+      "pattern": "\\bsk-ant-[A-Za-z0-9_-]{20,}\\b"
+    },
+    {
+      "id": "openrouter-key",
+      "label": "OpenRouter API Key",
+      "pattern": "\\bsk-or-[A-Za-z0-9_-]{20,}\\b"
+    },
+    {
+      "id": "github-pat",
+      "label": "GitHub Token",
+      "pattern": "(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})"
+    },
+    {
+      "id": "private-key-block",
+      "label": "Private Key (PEM)",
+      "pattern": "-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"
+    },
+    {
+      "id": "bearer-token",
+      "label": "Bearer Token",
+      "pattern": "Bearer [a-zA-Z0-9\\-._~+/]{20,}={0,2}"
+    },
+    {
+      "id": "eth-private-key",
+      "label": "Ethereum Private Key",
+      "pattern": "0x[a-fA-F0-9]{64}"
+    },
+    {
+      "id": "btc-wif-key",
+      "label": "Bitcoin WIF Key",
+      "pattern": "[5KL][1-9A-HJ-NP-Za-km-z]{50,51}"
+    },
+    {
+      "id": "slack-token",
+      "label": "Slack Token",
+      "pattern": "xox[bpas]-[0-9a-zA-Z\\-]{10,}"
+    },
+    {
+      "id": "slack-webhook",
+      "label": "Slack Webhook URL",
+      "pattern": "https://hooks\\.slack(?:-gov)?\\.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}"
+    },
+    {
+      "id": "google-oauth",
+      "label": "Google OAuth Token",
+      "pattern": "ya29\\.[0-9A-Za-z_-]{20,}"
+    },
+    {
+      "id": "google-api-key",
+      "label": "Google API Key",
+      "pattern": "AIza[0-9A-Za-z\\-_]{35}"
+    },
+    {
+      "id": "discord-bot-token",
+      "label": "Discord Bot Token",
+      "pattern": "[MN][a-zA-Z0-9]{23,}\\.[a-zA-Z0-9_-]{6}\\.[a-zA-Z0-9_-]{27,}"
+    },
+    {
+      "id": "postgres-db-url",
+      "label": "PostgreSQL URL (with creds)",
+      "pattern": "postgres(?:ql)?://[A-Za-z0-9._%+-]+:[^@\\s]+@[^\\s/]+(?:/[^\\s?]+)?(?:\\?[^\\s]+)?"
+    },
+    {
+      "id": "ssn",
+      "label": "US Social Security Number",
+      "pattern": "\\b\\d{3}-\\d{2}-\\d{4}\\b"
+    },
+    {
+      "id": "env-file-dump",
+      "label": "Environment Variable Dump",
+      "pattern": "(?:[A-Z_]{2,}=\\S+\\n){3,}"
+    }
+  ]
+}

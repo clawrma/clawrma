@@ -1,0 +1,1625 @@
+﻿import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PassThrough, Writable } from "node:stream";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CONFIG_PATH } from "./constants.js";
+import type { ClawrmaConfig } from "./types.js";
+import type { OpenClawConfig } from "./integrations/openclaw.js";
+import type { SolverHandle } from "./solver.js";
+
+const readConfigMock = vi.fn<() => Promise<ClawrmaConfig | null>>();
+const writeConfigMock = vi.fn<(config: ClawrmaConfig) => Promise<void>>();
+const getBalanceMock = vi.fn();
+const getStatusMock = vi.fn();
+const requestChatCompletionsMock = vi.fn();
+const submitTaskMock = vi.fn();
+const updateAccountSettingsMock = vi.fn();
+const truncateKeyMock = vi.fn((value: string) => value);
+const readOpenClawConfigMock = vi.fn<() => Promise<OpenClawConfig | null>>();
+const runSetupMock = vi.fn();
+const startSolverMock = vi.fn<() => Promise<SolverHandle>>();
+const startSolverIntakeMock = vi.fn();
+const stopSolverIntakeMock = vi.fn();
+const reconfigureSolverMock = vi.fn();
+const solverModuleLoadMock = vi.fn();
+
+vi.mock("./config.js", () => ({
+  readConfig: readConfigMock,
+  writeConfig: writeConfigMock,
+}));
+
+vi.mock("./client.js", () => ({
+  getBalance: getBalanceMock,
+  getStatus: getStatusMock,
+  requestChatCompletions: requestChatCompletionsMock,
+  submitTask: submitTaskMock,
+  updateAccountSettings: updateAccountSettingsMock,
+  truncateKey: truncateKeyMock,
+}));
+
+vi.mock("./setup.js", () => ({
+  runSetup: runSetupMock,
+}));
+
+vi.mock("./solver.js", () => {
+  solverModuleLoadMock();
+  return {
+    startSolver: startSolverMock,
+    startSolverIntake: startSolverIntakeMock,
+    stopSolverIntake: stopSolverIntakeMock,
+    reconfigureSolver: reconfigureSolverMock,
+  };
+});
+
+vi.mock("./integrations/openclaw.js", () => ({
+  readOpenClawConfig: readOpenClawConfigMock,
+}));
+
+const { createProgram, runCli } = await import("./cli.js");
+const PNG_1X1_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/w8AAgMBAp0fvwAAAABJRU5ErkJggg==";
+const PNG_1X1_BYTES = Buffer.from(PNG_1X1_BASE64, "base64");
+
+function makeConfig(): ClawrmaConfig {
+  return {
+    version: 1,
+    accountId: "cr_usr_test",
+    apiKey: "cr_sk_test",
+    apiBaseUrl: "https://api.clawrma.com",
+    framework: "none",
+    solver: {
+      enabled: true,
+      schedule: {
+        preset: "overnight",
+        source: "manual",
+        timezone: "UTC",
+        windows: [],
+      },
+      taskTypes: [
+        "proxy_fetch",
+        "screenshot",
+        "page_snapshot",
+        "web_search",
+        "llm_inference",
+      ],
+      excludedBillingTypes: ["per_token"],
+      domainPolicy: "allowlist",
+    },
+    webFetchFallback: {
+      injected: false,
+      method: "none",
+    },
+    notifications: {
+      channel: "",
+      target: "",
+      earningsThreshold: 1,
+      dailySummary: false,
+    },
+    welcomeCredit: 200,
+    installedAt: "2026-02-25T00:00:00.000Z",
+  };
+}
+
+function makeOpenClawConfig(agentWorkApiKey: string): OpenClawConfig {
+  return {
+    path: "/tmp/openclaw.json",
+    raw: {
+      skills: {
+        entries: {
+          clawrma: {
+            env: {
+              CLAWRMA_API_KEY: agentWorkApiKey,
+            },
+          },
+        },
+      },
+    },
+    providers: [],
+    activeHours: null,
+    activeHoursTimezone: null,
+    existingSearchConfig: false,
+    existingFirecrawlConfig: false,
+  };
+}
+
+function makeStatusResponse(
+  overrides: Partial<{
+    activeTasks: number;
+    tasksSolvedToday: number;
+    tasksSolvedTotal: number;
+    earningsToday: number;
+    earningsTotal: number;
+    paused: boolean | null;
+    connected: boolean | null;
+  }> = {},
+): {
+  balance: number;
+  solverState: {
+    activeTasks: number;
+    tasksSolvedToday: number;
+    tasksSolvedTotal: number;
+    earningsToday: number;
+    earningsTotal: number;
+    paused: boolean | null;
+    connected: boolean | null;
+  };
+  recentActivity: {
+    tasksSolvedToday: number;
+    earningsToday: number;
+  };
+  uptimeSeconds: number | null;
+  capabilities: [];
+} {
+  const solverState = {
+    activeTasks: overrides.activeTasks ?? 0,
+    tasksSolvedToday: overrides.tasksSolvedToday ?? 0,
+    tasksSolvedTotal: overrides.tasksSolvedTotal ?? 0,
+    earningsToday: overrides.earningsToday ?? 0,
+    earningsTotal: overrides.earningsTotal ?? 0,
+    paused: overrides.paused === undefined ? false : overrides.paused,
+    connected: overrides.connected === undefined ? true : overrides.connected,
+  };
+
+  return {
+    balance: 200,
+    solverState,
+    recentActivity: {
+      tasksSolvedToday: solverState.tasksSolvedToday,
+      earningsToday: solverState.earningsToday,
+    },
+    uptimeSeconds: 0,
+    capabilities: [],
+  };
+}
+
+type MockApiError = Error & {
+  status: number;
+  apiError: { error: { type: string; message: string } };
+};
+
+function makeApiError(
+  status: number,
+  type: string,
+  message: string,
+): MockApiError {
+  const error = new Error(message) as MockApiError;
+  error.status = status;
+  error.apiError = {
+    error: {
+      type,
+      message,
+    },
+  };
+  return error;
+}
+
+function createCapturedStream(): {
+  stream: NodeJS.WritableStream;
+  read: () => string;
+} {
+  const chunks: string[] = [];
+  const stream = new Writable({
+    write(chunk, _encoding, callback) {
+      chunks.push(
+        Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk),
+      );
+      callback();
+    },
+  });
+
+  return {
+    stream,
+    read: () => chunks.join(""),
+  };
+}
+
+function createCliIo(input = ""): {
+  io: {
+    stdin: NodeJS.ReadableStream;
+    stdout: NodeJS.WritableStream;
+    stderr: NodeJS.WritableStream;
+  };
+  stdout: () => string;
+  stderr: () => string;
+} {
+  const stdin = new PassThrough();
+  stdin.end(input);
+  const stdout = createCapturedStream();
+  const stderr = createCapturedStream();
+
+  return {
+    io: {
+      stdin,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    },
+    stdout: stdout.read,
+    stderr: stderr.read,
+  };
+}
+
+function createSseResponse(lines: string[]): Response {
+  const encoder = new TextEncoder();
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const line of lines) {
+          controller.enqueue(encoder.encode(`${line}\n`));
+        }
+        controller.close();
+      },
+    }),
+    {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    },
+  );
+}
+
+async function renderHelpOutput(argv: string[]): Promise<string> {
+  const chunks: string[] = [];
+  const program = createProgram();
+  program.configureOutput({
+    writeOut: (value: string) => {
+      chunks.push(value);
+    },
+    writeErr: (value: string) => {
+      chunks.push(value);
+    },
+  });
+  program.exitOverride();
+
+  try {
+    await program.parseAsync(argv);
+  } catch (error: unknown) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? String((error as { code: unknown }).code)
+        : "";
+    if (code !== "commander.helpDisplayed") {
+      throw error;
+    }
+  }
+
+  return chunks.join("");
+}
+
+function expectTaggedSnapshotPayload(
+  payload: Record<string, unknown>,
+  expectedFormat: "markdown" | "ai" | "aria" | "role",
+): void {
+  expect(payload.snapshot_format).toBe(expectedFormat);
+
+  if (expectedFormat === "markdown") {
+    expect(typeof payload.snapshot).toBe("string");
+    return;
+  }
+
+  if (expectedFormat === "ai") {
+    expect(typeof payload.snapshot).toBe("string");
+    return;
+  }
+
+  expect(payload.snapshot).toEqual(expect.any(Object));
+}
+
+describe("task convenience commands", () => {
+  let originalCwd = "";
+  let tempDir = "";
+
+  beforeEach(async () => {
+    originalCwd = process.cwd();
+    tempDir = await mkdtemp(join(tmpdir(), "clawrma-cli-test-"));
+    process.chdir(tempDir);
+
+    readConfigMock.mockResolvedValue(makeConfig());
+    writeConfigMock.mockReset();
+    writeConfigMock.mockResolvedValue(undefined);
+    getBalanceMock.mockReset();
+    getStatusMock.mockReset();
+    requestChatCompletionsMock.mockReset();
+    submitTaskMock.mockReset();
+    updateAccountSettingsMock.mockReset();
+    truncateKeyMock.mockClear();
+    readOpenClawConfigMock.mockReset();
+    runSetupMock.mockReset();
+    startSolverMock.mockReset();
+    startSolverIntakeMock.mockReset();
+    stopSolverIntakeMock.mockReset();
+    reconfigureSolverMock.mockReset();
+    solverModuleLoadMock.mockReset();
+    process.exitCode = undefined;
+  });
+
+  afterEach(async () => {
+    process.chdir(originalCwd);
+    await rm(tempDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it("runs fetch command and prints JSON", async () => {
+    submitTaskMock.mockResolvedValue({
+      url: "https://example.com/",
+      status_code: 200,
+      headers: { "content-type": "text/html" },
+      body: "<html>ok</html>",
+      content_format: "html",
+      original_content_type: "text/html",
+      elapsed_ms: 12,
+    });
+
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "fetch", "https://example.com"]);
+
+    expect(submitTaskMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      "proxy_fetch",
+      { url: "https://example.com/" },
+      false,
+    );
+
+    const output = consoleSpy.mock.calls[0]?.[0];
+    expect(typeof output).toBe("string");
+    const parsed = JSON.parse(String(output));
+    expect(parsed).toMatchObject({
+      url: "https://example.com/",
+      status_code: 200,
+      body: "<html>ok</html>",
+      content_format: "html",
+      original_content_type: "text/html",
+    });
+  });
+
+  it("submits raw_html only when the fetch flag is present", async () => {
+    submitTaskMock.mockResolvedValue({
+      url: "https://example.com/",
+      status_code: 200,
+      headers: { "content-type": "text/html; charset=utf-8" },
+      body: "<html>ok</html>",
+      content_format: "html",
+      original_content_type: "text/html; charset=utf-8",
+      elapsed_ms: 12,
+    });
+
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli([
+      "node",
+      "clawrma",
+      "fetch",
+      "https://example.com",
+      "--raw-html",
+    ]);
+
+    expect(submitTaskMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      "proxy_fetch",
+      { url: "https://example.com/", raw_html: true },
+      false,
+    );
+
+    consoleSpy.mockRestore();
+  });
+
+  it("prints the current solver domain policy", async () => {
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "solver", "domains"]);
+
+    expect(consoleSpy).toHaveBeenCalledWith("popular sites only");
+  });
+
+  it("sets solver domain policy to open", async () => {
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "solver", "domains", "open"]);
+
+    expect(writeConfigMock).toHaveBeenCalledWith({
+      ...makeConfig(),
+      solver: {
+        ...makeConfig().solver,
+        domainPolicy: "open",
+      },
+    });
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "Solver domain policy set to open internet.",
+    );
+  });
+
+  it("sets solver domain policy to allowlist default", async () => {
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+    readConfigMock.mockResolvedValue({
+      ...makeConfig(),
+      solver: {
+        ...makeConfig().solver,
+        domainPolicy: "open",
+      },
+    });
+
+    await runCli(["node", "clawrma", "solver", "domains", "default"]);
+
+    expect(writeConfigMock).toHaveBeenCalledWith({
+      ...makeConfig(),
+      solver: {
+        ...makeConfig().solver,
+        domainPolicy: "allowlist",
+      },
+    });
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "Solver domain policy set to popular sites only.",
+    );
+  });
+
+  it("runs screenshot command, writes image file, and prints output metadata", async () => {
+    submitTaskMock.mockResolvedValue({
+      image_base64: PNG_1X1_BASE64,
+      url: "https://example.com/",
+      elapsed_ms: 22,
+    });
+
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli([
+      "node",
+      "clawrma",
+      "screenshot",
+      "https://example.com",
+      "--viewport",
+      "800x600",
+      "--full-page",
+    ]);
+
+    expect(submitTaskMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      "screenshot",
+      {
+        url: "https://example.com/",
+        viewport: { width: 800, height: 600 },
+        full_page: true,
+      },
+      false,
+    );
+
+    const output = consoleSpy.mock.calls[0]?.[0];
+    const parsed = JSON.parse(String(output));
+    expect(parsed.format).toBe("png");
+    expect(parsed.output_path).toMatch(/example\.com-.*\.png$/);
+
+    const written = await readFile(parsed.output_path);
+    expect(written).toEqual(PNG_1X1_BYTES);
+  });
+
+  it("fails loudly and does not write a file for invalid screenshot base64", async () => {
+    submitTaskMock.mockResolvedValue({
+      image_base64: "not-base64!!!",
+      url: "https://example.com/",
+      elapsed_ms: 22,
+    });
+
+    await expect(
+      runCli(["node", "clawrma", "screenshot", "https://example.com"]),
+    ).rejects.toThrow(
+      "Screenshot response returned invalid base64 image data.",
+    );
+
+    expect(await readdir(tempDir)).toEqual([]);
+  });
+
+  it("fails loudly and does not write a file for non-PNG screenshot bytes", async () => {
+    submitTaskMock.mockResolvedValue({
+      image_base64: Buffer.from("not-a-png").toString("base64"),
+      url: "https://example.com/",
+      elapsed_ms: 22,
+    });
+
+    await expect(
+      runCli(["node", "clawrma", "screenshot", "https://example.com"]),
+    ).rejects.toThrow("Screenshot response returned non-PNG image data.");
+
+    expect(await readdir(tempDir)).toEqual([]);
+  });
+
+  it("runs snapshot command with optional flags", async () => {
+    submitTaskMock.mockResolvedValue({
+      snapshot: { nodes: [{ role: "main" }] },
+      snapshot_format: "aria",
+      title: "Example Domain",
+      url: "https://example.com/",
+      elapsed_ms: 18,
+    });
+
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli([
+      "node",
+      "clawrma",
+      "snapshot",
+      "https://example.com",
+      "--mode",
+      "aria",
+      "--selector",
+      "#main",
+    ]);
+
+    expect(submitTaskMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      "page_snapshot",
+      {
+        url: "https://example.com/",
+        mode: "aria",
+        selector: "#main",
+      },
+      false,
+    );
+
+    const output = consoleSpy.mock.calls[0]?.[0];
+    const parsed = JSON.parse(String(output));
+    expect(parsed.title).toBe("Example Domain");
+    expectTaggedSnapshotPayload(parsed, "aria");
+    expect(parsed.snapshot).toEqual({ nodes: [{ role: "main" }] });
+  });
+
+  it("prints tagged markdown snapshots without forcing object normalization", async () => {
+    submitTaskMock.mockResolvedValue({
+      snapshot: "# Example Domain",
+      snapshot_format: "markdown",
+      title: "Example Domain",
+      url: "https://example.com/",
+      elapsed_ms: 18,
+    });
+
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "snapshot", "https://example.com"]);
+
+    const output = consoleSpy.mock.calls[0]?.[0];
+    const parsed = JSON.parse(String(output));
+    expect(parsed.title).toBe("Example Domain");
+    expectTaggedSnapshotPayload(parsed, "markdown");
+    expect(parsed.snapshot).toBe("# Example Domain");
+  });
+
+  it("prints tagged ai snapshots without forcing object normalization", async () => {
+    submitTaskMock.mockResolvedValue({
+      snapshot: "Summarized page intent",
+      snapshot_format: "ai",
+      title: "Example Domain",
+      url: "https://example.com/",
+      elapsed_ms: 18,
+    });
+
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "snapshot", "https://example.com"]);
+
+    const output = consoleSpy.mock.calls[0]?.[0];
+    const parsed = JSON.parse(String(output));
+    expect(parsed.title).toBe("Example Domain");
+    expectTaggedSnapshotPayload(parsed, "ai");
+    expect(parsed.snapshot).toBe("Summarized page intent");
+  });
+
+  it("runs search command with rest-of-argv query parsing", async () => {
+    submitTaskMock.mockResolvedValue({
+      query: "AI agent frameworks",
+      results: [
+        {
+          title: "Result",
+          url: "https://example.com",
+          snippet: "snippet",
+          ignored: true,
+        },
+        { title: 1, url: false, snippet: "only-snippet" },
+        null,
+        3,
+        {},
+      ],
+      elapsed_ms: 9,
+    });
+
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli([
+      "node",
+      "clawrma",
+      "search",
+      "AI",
+      "agent",
+      "frameworks",
+      "--count",
+      "7",
+    ]);
+
+    expect(submitTaskMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      "web_search",
+      {
+        query: "AI agent frameworks",
+        count: 7,
+      },
+      false,
+    );
+
+    const output = consoleSpy.mock.calls[0]?.[0];
+    const parsed = JSON.parse(String(output));
+    expect(parsed.query).toBe("AI agent frameworks");
+    expect(parsed.results).toEqual([
+      { title: "Result", url: "https://example.com", snippet: "snippet" },
+      { title: "", url: "", snippet: "only-snippet" },
+      { title: "", url: "", snippet: "" },
+    ]);
+  });
+
+  it("streams inference output chunks to stdout", async () => {
+    requestChatCompletionsMock.mockResolvedValue(
+      createSseResponse([
+        'data: {"object":"chat.completion.chunk","choices":[{"delta":{"content":"hello "},"finish_reason":null}]}',
+        'data: {"object":"chat.completion.chunk","choices":[{"delta":{"content":"world"},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+      ]),
+    );
+    const { io, stdout } = createCliIo();
+
+    await runCli(["node", "clawrma", "infer", "Say hello"], io);
+
+    expect(requestChatCompletionsMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      {
+        model: "clawrma/strong",
+        stream: true,
+        messages: [{ role: "user", content: "Say hello" }],
+      },
+    );
+    expect(stdout()).toBe("hello world\n");
+  });
+
+  it("prints non-streaming inference responses to stdout", async () => {
+    requestChatCompletionsMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          object: "chat.completion",
+          choices: [
+            { message: { role: "assistant", content: "Full response" } },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    const { io, stdout } = createCliIo();
+
+    await runCli(
+      ["node", "clawrma", "infer", "--no-stream", "Summarize this"],
+      io,
+    );
+
+    expect(requestChatCompletionsMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      {
+        model: "clawrma/strong",
+        stream: false,
+        messages: [{ role: "user", content: "Summarize this" }],
+      },
+    );
+    expect(stdout()).toBe("Full response\n");
+  });
+
+  it("builds inference messages with a system prompt", async () => {
+    requestChatCompletionsMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          object: "chat.completion",
+          choices: [{ message: { role: "assistant", content: "Done" } }],
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    const { io } = createCliIo();
+
+    await runCli(
+      [
+        "node",
+        "clawrma",
+        "infer",
+        "--no-stream",
+        "--system",
+        "Be terse",
+        "Explain DNS",
+      ],
+      io,
+    );
+
+    expect(requestChatCompletionsMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      {
+        model: "clawrma/strong",
+        stream: false,
+        messages: [
+          { role: "system", content: "Be terse" },
+          { role: "user", content: "Explain DNS" },
+        ],
+      },
+    );
+  });
+
+  it("reads inference prompts from stdin", async () => {
+    requestChatCompletionsMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          object: "chat.completion",
+          choices: [{ message: { role: "assistant", content: "From stdin" } }],
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    const { io } = createCliIo("Prompt from stdin\n");
+
+    await runCli(["node", "clawrma", "infer", "--stdin", "--no-stream"], io);
+
+    expect(requestChatCompletionsMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      {
+        model: "clawrma/strong",
+        stream: false,
+        messages: [{ role: "user", content: "Prompt from stdin" }],
+      },
+    );
+  });
+
+  it("blocks local inference submission when the safety scan flags the prompt", async () => {
+    const { io } = createCliIo();
+
+    await expect(
+      runCli(
+        ["node", "clawrma", "infer", "sk-ant-api03-realKey1234567890abcdef"],
+        io,
+      ),
+    ).rejects.toThrow("Sensitive content detected (Anthropic API Key).");
+
+    expect(requestChatCompletionsMock).not.toHaveBeenCalled();
+  });
+
+  it("allows callers to skip the local inference safety scan", async () => {
+    requestChatCompletionsMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          object: "chat.completion",
+          choices: [{ message: { role: "assistant", content: "Bypassed" } }],
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    const { io } = createCliIo();
+
+    await runCli(
+      [
+        "node",
+        "clawrma",
+        "infer",
+        "--no-stream",
+        "--no-safety-scan",
+        "sk-ant-api03-realKey1234567890abcdef",
+      ],
+      io,
+    );
+
+    expect(requestChatCompletionsMock).toHaveBeenCalledOnce();
+  });
+
+  it("skips local inference scanning when promptSafetyScan is disabled in config", async () => {
+    requestChatCompletionsMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          object: "chat.completion",
+          choices: [
+            { message: { role: "assistant", content: "Bypassed by config" } },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    readConfigMock.mockResolvedValue({
+      ...makeConfig(),
+      promptSafetyScan: false,
+    });
+    const { io } = createCliIo();
+
+    await runCli(
+      [
+        "node",
+        "clawrma",
+        "infer",
+        "--no-stream",
+        "sk-ant-api03-realKey1234567890abcdef",
+      ],
+      io,
+    );
+
+    expect(requestChatCompletionsMock).toHaveBeenCalledOnce();
+  });
+
+  it("passes disabled promptSafetyScan config through to submitTask", async () => {
+    readConfigMock.mockResolvedValue({
+      ...makeConfig(),
+      promptSafetyScan: false,
+    });
+    submitTaskMock.mockResolvedValue({
+      query: "AI agent frameworks",
+      results: [],
+      elapsed_ms: 9,
+    });
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "search", "AI", "agent", "frameworks"]);
+
+    expect(submitTaskMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      "web_search",
+      {
+        query: "AI agent frameworks",
+        count: 5,
+      },
+      true,
+    );
+    consoleSpy.mockRestore();
+  });
+
+  it("passes disabled promptSafetyScan config through to fetch", async () => {
+    readConfigMock.mockResolvedValue({
+      ...makeConfig(),
+      promptSafetyScan: false,
+    });
+    submitTaskMock.mockResolvedValue({
+      url: "https://example.com/",
+      status_code: 200,
+      headers: {},
+      body: "ok",
+      elapsed_ms: 12,
+    });
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "fetch", "https://example.com"]);
+
+    expect(submitTaskMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      "proxy_fetch",
+      { url: "https://example.com/" },
+      true,
+    );
+    consoleSpy.mockRestore();
+  });
+
+  it("passes disabled promptSafetyScan config through to screenshot", async () => {
+    readConfigMock.mockResolvedValue({
+      ...makeConfig(),
+      promptSafetyScan: false,
+    });
+    submitTaskMock.mockResolvedValue({
+      image_base64: PNG_1X1_BASE64,
+      url: "https://example.com/",
+      elapsed_ms: 22,
+    });
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "screenshot", "https://example.com"]);
+
+    expect(submitTaskMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      "screenshot",
+      {
+        url: "https://example.com/",
+        viewport: { width: 1280, height: 720 },
+        full_page: false,
+      },
+      true,
+    );
+    consoleSpy.mockRestore();
+  });
+
+  it("passes disabled promptSafetyScan config through to snapshot", async () => {
+    readConfigMock.mockResolvedValue({
+      ...makeConfig(),
+      promptSafetyScan: false,
+    });
+    submitTaskMock.mockResolvedValue({
+      snapshot: { nodes: [] },
+      snapshot_format: "aria",
+      title: "Example Domain",
+      url: "https://example.com/",
+      elapsed_ms: 18,
+    });
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "snapshot", "https://example.com"]);
+
+    expect(submitTaskMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      "page_snapshot",
+      {
+        url: "https://example.com/",
+      },
+      true,
+    );
+    consoleSpy.mockRestore();
+  });
+
+  it("validates fetch URL scheme before submitTask", async () => {
+    await expect(
+      runCli(["node", "clawrma", "fetch", "ftp://example.com"]),
+    ).rejects.toThrow(
+      "Unsupported URL protocol 'ftp:'. Use http:// or https://.",
+    );
+    expect(submitTaskMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed --count values", async () => {
+    await expect(
+      runCli(["node", "clawrma", "search", "clawrma", "--count", "5abc"]),
+    ).rejects.toThrow(
+      "Invalid --count '5abc'. Expected an integer between 1 and 10.",
+    );
+    expect(submitTaskMock).not.toHaveBeenCalled();
+  });
+
+  it("maps API insufficient-balance errors to explicit command messages", async () => {
+    submitTaskMock.mockRejectedValue(
+      makeApiError(402, "insufficient_balance", "Balance too low"),
+    );
+
+    await expect(
+      runCli(["node", "clawrma", "search", "clawrma"]),
+    ).rejects.toThrow("Insufficient balance (HTTP 402). Add funds and retry.");
+  });
+
+  it("maps API timeout errors to explicit command messages", async () => {
+    submitTaskMock.mockRejectedValue(
+      makeApiError(504, "timeout", "task_timed_out"),
+    );
+
+    await expect(
+      runCli(["node", "clawrma", "snapshot", "https://example.com"]),
+    ).rejects.toThrow(
+      "Task 'page_snapshot' timed out waiting for solver completion (HTTP 504).",
+    );
+  });
+
+  it("maps API no-solver errors to explicit command messages", async () => {
+    submitTaskMock.mockRejectedValue(
+      makeApiError(503, "no_solver", "No solver available"),
+    );
+
+    await expect(
+      runCli(["node", "clawrma", "fetch", "https://example.com"]),
+    ).rejects.toThrow(
+      "No solver is currently available for task type 'proxy_fetch' (HTTP 503).",
+    );
+  });
+
+  it("maps standardized task-failed no-solver errors to explicit command messages", async () => {
+    submitTaskMock.mockRejectedValue(
+      makeApiError(500, "task_failed", "no_solvers_available"),
+    );
+
+    await expect(
+      runCli(["node", "clawrma", "fetch", "https://example.com"]),
+    ).rejects.toThrow(
+      "No solver is currently available for task type 'proxy_fetch' (HTTP 500).",
+    );
+  });
+
+  it("renders disconnected solver status as offline", async () => {
+    getStatusMock.mockResolvedValue(
+      makeStatusResponse({ connected: false, paused: null }),
+    );
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "status"]);
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "  Solver      configured, not running - 0 tasks solved today",
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "  Next        npx clawrma solver run",
+    );
+  });
+
+  it("renders paused solver status explicitly", async () => {
+    getStatusMock.mockResolvedValue(
+      makeStatusResponse({ connected: true, paused: true }),
+    );
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "status"]);
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "  Solver      paused - 0 tasks solved today",
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "  Next        npx clawrma solver start",
+    );
+  });
+
+  it("renders connected idle solver status without reporting it as generic online", async () => {
+    getStatusMock.mockResolvedValue(
+      makeStatusResponse({ connected: true, paused: false, activeTasks: 0 }),
+    );
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "status"]);
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "  Solver      running (idle) - 0 tasks solved today",
+    );
+  });
+
+  it("renders connected busy solver status with active task count", async () => {
+    getStatusMock.mockResolvedValue(
+      makeStatusResponse({
+        connected: true,
+        paused: false,
+        activeTasks: 3,
+        tasksSolvedToday: 4,
+      }),
+    );
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "status"]);
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "  Solver      running (active tasks: 3) - 4 tasks solved today",
+    );
+  });
+
+  it("renders unknown solver connection state explicitly", async () => {
+    getStatusMock.mockResolvedValue(
+      makeStatusResponse({ connected: null, paused: null }),
+    );
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "status"]);
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "  Solver      connection unknown - 0 tasks solved today",
+    );
+  });
+
+  it("warns when openclaw API key differs from local Clawrma config", async () => {
+    const openClawConfig = makeConfig();
+    openClawConfig.framework = "openclaw";
+    openClawConfig.apiKey = "cr_sk_local";
+
+    readConfigMock.mockResolvedValue(openClawConfig);
+    readOpenClawConfigMock.mockResolvedValue(
+      makeOpenClawConfig("cr_sk_remote"),
+    );
+    getStatusMock.mockResolvedValue(makeStatusResponse());
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "status"]);
+
+    expect(logSpy).toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      "Warning: API key mismatch between ~/.clawrma/config.json and openclaw.json. Run 'npx clawrma auth setup' to re-sync.",
+    );
+  });
+
+  it("warns when openclaw CLAWRMA_API_KEY is missing", async () => {
+    const openClawConfig = makeConfig();
+    openClawConfig.framework = "openclaw";
+
+    readConfigMock.mockResolvedValue(openClawConfig);
+    readOpenClawConfigMock.mockResolvedValue(makeOpenClawConfig(""));
+    getStatusMock.mockResolvedValue(makeStatusResponse());
+
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "status"]);
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      "Warning: OpenClaw CLAWRMA_API_KEY is missing in openclaw.json. Run 'npx clawrma auth setup' to re-sync.",
+    );
+  });
+
+  it("warns when openclaw config cannot be read for drift check", async () => {
+    const openClawConfig = makeConfig();
+    openClawConfig.framework = "openclaw";
+
+    readConfigMock.mockResolvedValue(openClawConfig);
+    readOpenClawConfigMock.mockRejectedValue(
+      new Error("openclaw config unavailable"),
+    );
+    getStatusMock.mockResolvedValue(makeStatusResponse());
+
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "status"]);
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      "Warning: Unable to read OpenClaw CLAWRMA_API_KEY from openclaw.json. Run 'npx clawrma auth setup' to verify sync.",
+    );
+  });
+
+  it("reports auth status as authenticated when the live auth check succeeds", async () => {
+    getBalanceMock.mockResolvedValue({ balance: 200 });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "auth", "status"]);
+
+    expect(logSpy.mock.calls.map(([message]) => String(message))).toEqual([
+      "Clawrma: authenticated",
+      "  Account   cr_usr_test",
+      "  Key       cr_sk_test",
+      "  API       https://api.clawrma.com",
+      "  Balance   200.00 points",
+    ]);
+    expect(process.exitCode).toBe(0);
+    expect(getBalanceMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+    );
+  });
+
+  it("reports auth status as not configured when no local config exists", async () => {
+    readConfigMock.mockResolvedValue(null);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "auth", "status"]);
+
+    expect(logSpy.mock.calls.map(([message]) => String(message))).toEqual([
+      "Clawrma: not configured",
+      "  Run       npx clawrma auth setup",
+    ]);
+    expect(process.exitCode).toBe(1);
+    expect(getBalanceMock).not.toHaveBeenCalled();
+  });
+
+  it("reports auth status as cannot reach API on transport failures", async () => {
+    getBalanceMock.mockRejectedValue(new Error("Network request failed"));
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "auth", "status"]);
+
+    expect(logSpy.mock.calls.map(([message]) => String(message))).toEqual([
+      "Clawrma: configured (cannot reach API)",
+      "  Account   cr_usr_test",
+      "  Key       cr_sk_test",
+      "  API       https://api.clawrma.com",
+      "  Error     Network request failed",
+    ]);
+    expect(process.exitCode).toBe(2);
+  });
+
+  it("reports auth status as rejected for unauthorized credentials", async () => {
+    getBalanceMock.mockRejectedValue(
+      makeApiError(401, "request_failed", "401 unauthorized"),
+    );
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "auth", "status"]);
+
+    expect(logSpy.mock.calls.map(([message]) => String(message))).toEqual([
+      "Clawrma: auth rejected",
+      "  Account   cr_usr_test",
+      "  Key       cr_sk_test",
+      "  API       https://api.clawrma.com",
+      "  Error     401 unauthorized",
+      "  Run       npx clawrma auth setup",
+    ]);
+    expect(process.exitCode).toBe(3);
+  });
+
+  it("reports auth status as invalid local config when config loading fails", async () => {
+    readConfigMock.mockRejectedValue(
+      new Error(
+        "Config at /tmp/.clawrma/config.json does not match ClawrmaConfig schema.",
+      ),
+    );
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "auth", "status"]);
+
+    expect(logSpy.mock.calls.map(([message]) => String(message))).toEqual([
+      "Clawrma: invalid local config",
+      `  File      ${CONFIG_PATH}`,
+      "  Error     Config at /tmp/.clawrma/config.json does not match ClawrmaConfig schema.",
+      "  Run       npx clawrma auth setup",
+    ]);
+    expect(process.exitCode).toBe(4);
+    expect(getBalanceMock).not.toHaveBeenCalled();
+  });
+
+  it("reports auth status as OpenClaw sync broken when the mirrored key is missing or mismatched", async () => {
+    const openClawConfig = {
+      ...makeConfig(),
+      framework: "openclaw" as const,
+      apiKey: "cr_sk_local",
+    };
+    readConfigMock.mockResolvedValue(openClawConfig);
+    getBalanceMock.mockResolvedValue({ balance: 200 });
+    readOpenClawConfigMock.mockResolvedValue(makeOpenClawConfig("cr_sk_other"));
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "auth", "status"]);
+
+    expect(logSpy.mock.calls.map(([message]) => String(message))).toEqual([
+      "Clawrma: OpenClaw sync broken",
+      "  Account   cr_usr_test",
+      "  Key       cr_sk_local",
+      "  API       https://api.clawrma.com",
+      "  Error     OpenClaw CLAWRMA_API_KEY is missing or does not match ~/.clawrma/config.json",
+      "  Run       npx clawrma auth setup",
+    ]);
+    expect(process.exitCode).toBe(5);
+  });
+
+  it("runs auth setup as an OpenClaw-first wrapper", async () => {
+    await runCli(["node", "clawrma", "auth", "setup"]);
+
+    expect(runSetupMock).toHaveBeenCalledWith({
+      framework: "openclaw",
+      interactive: true,
+      solver: undefined,
+      schedule: undefined,
+      apiBaseUrl: undefined,
+    });
+  });
+
+  it("passes auth setup flags through to runSetup without exposing framework selection", async () => {
+    await runCli([
+      "node",
+      "clawrma",
+      "auth",
+      "setup",
+      "--no-interactive",
+      "--solver",
+      "on",
+      "--schedule",
+      "overnight",
+      "--api-base-url",
+      "https://staging.clawrma.test",
+    ]);
+
+    expect(runSetupMock).toHaveBeenCalledWith({
+      framework: "openclaw",
+      interactive: false,
+      solver: "on",
+      schedule: "overnight",
+      apiBaseUrl: "https://staging.clawrma.test",
+    });
+  });
+
+  it("does not advertise framework selection on auth setup", async () => {
+    const { io } = createCliIo();
+    const program = createProgram(io);
+    const authCommand = program.commands.find(
+      (command) => command.name() === "auth",
+    );
+    const authSetupCommand = authCommand?.commands.find(
+      (command) => command.name() === "setup",
+    );
+
+    expect(authSetupCommand?.helpInformation()).not.toContain("--framework");
+  });
+
+  it("passes non-interactive setup flags through to runSetup", async () => {
+    await runCli([
+      "node",
+      "clawrma",
+      "setup",
+      "--framework",
+      "none",
+      "--no-interactive",
+      "--solver",
+      "on",
+      "--schedule",
+      "overnight",
+    ]);
+
+    expect(runSetupMock).toHaveBeenCalledWith({
+      framework: "none",
+      interactive: false,
+      solver: "on",
+      schedule: "overnight",
+      webFetchFallback: undefined,
+      apiBaseUrl: undefined,
+    });
+  });
+
+  it("does not advertise the removed provider fallback setup flag", async () => {
+    const { io } = createCliIo();
+    const program = createProgram(io);
+    const setupCommand = program.commands.find(
+      (command) => command.name() === "setup",
+    );
+
+    expect(setupCommand?.helpInformation()).not.toContain(
+      ["--provider", "fallback"].join("-"),
+    );
+  });
+
+  it("shows both setup paths in top-level help and preserves workflow command order", async () => {
+    const { io } = createCliIo();
+    const program = createProgram(io);
+    const help = await renderHelpOutput(["node", "clawrma", "--help"]);
+
+    expect(help).toContain("OpenClaw users (recommended):");
+    expect(help).toContain("npx clawrma auth setup");
+    expect(help).toContain("npx clawrma setup --framework none --interactive");
+    expect(program.commands.map((command) => command.name())).toEqual([
+      "auth",
+      "setup",
+      "config",
+      "search",
+      "fetch",
+      "screenshot",
+      "snapshot",
+      "infer",
+      "status",
+      "balance",
+      "version",
+      "solver",
+    ]);
+
+    const configCommand = program.commands.find(
+      (command) => command.name() === "config",
+    );
+    expect(configCommand?.commands.map((command) => command.name())).toEqual([
+      "show",
+      "set",
+    ]);
+  });
+
+  it("masks short API keys in config show output", async () => {
+    readConfigMock.mockResolvedValue({
+      ...makeConfig(),
+      apiKey: "short",
+    });
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "config", "show"]);
+
+    const output = String(consoleSpy.mock.calls[0]?.[0]);
+    expect(JSON.parse(output)).toMatchObject({
+      apiKey: "[masked]",
+      accountId: "cr_usr_test",
+    });
+    expect(output).not.toContain('"apiKey": "short"');
+  });
+
+  it("sets promptSafetyScan false locally and on the server", async () => {
+    updateAccountSettingsMock.mockResolvedValue({ prompt_safety_scan: false });
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli([
+      "node",
+      "clawrma",
+      "config",
+      "set",
+      "promptSafetyScan",
+      "false",
+    ]);
+
+    expect(writeConfigMock).toHaveBeenCalledWith({
+      ...makeConfig(),
+      promptSafetyScan: false,
+    });
+    expect(updateAccountSettingsMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      { prompt_safety_scan: false },
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "Prompt safety scan disabled locally and on server.",
+    );
+  });
+
+  it("sets promptSafetyScan true locally and on the server", async () => {
+    const existingConfig = {
+      ...makeConfig(),
+      promptSafetyScan: false,
+    };
+    readConfigMock.mockResolvedValue(existingConfig);
+    updateAccountSettingsMock.mockResolvedValue({ prompt_safety_scan: true });
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli([
+      "node",
+      "clawrma",
+      "config",
+      "set",
+      "promptSafetyScan",
+      "true",
+    ]);
+
+    expect(writeConfigMock).toHaveBeenCalledWith({
+      ...existingConfig,
+      promptSafetyScan: true,
+    });
+    expect(updateAccountSettingsMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      { prompt_safety_scan: true },
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "Prompt safety scan enabled locally and on server.",
+    );
+  });
+
+  it("writes promptSafetyScan locally even when the server sync fails", async () => {
+    updateAccountSettingsMock.mockRejectedValue(new Error("network offline"));
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+
+    await runCli([
+      "node",
+      "clawrma",
+      "config",
+      "set",
+      "promptSafetyScan",
+      "false",
+    ]);
+
+    expect(writeConfigMock).toHaveBeenCalledWith({
+      ...makeConfig(),
+      promptSafetyScan: false,
+    });
+    expect(warnSpy).toHaveBeenCalledWith(
+      "Warning: Prompt safety scan disabled locally, but the server setting was not updated: network offline",
+    );
+  });
+
+  it("does not load solver module for non-solver commands", async () => {
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "version"]);
+
+    expect(consoleSpy).toHaveBeenCalled();
+    expect(solverModuleLoadMock).not.toHaveBeenCalled();
+  });
+
+  it("loads solver module for solver commands", async () => {
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await runCli(["node", "clawrma", "solver", "start"]);
+
+    expect(solverModuleLoadMock).toHaveBeenCalledTimes(1);
+    expect(startSolverIntakeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: "cr_sk_test" }),
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "Solver resumed. solver.enabled is now true.",
+    );
+  });
+
+  it("runs the foreground solver runtime and stops cleanly on SIGTERM", async () => {
+    const consoleSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+    const stopMock = vi.fn(async () => undefined);
+    startSolverMock.mockResolvedValue({
+      stop: stopMock,
+      isRunning: () => true,
+      isPaused: () => false,
+    });
+
+    const emitSignal = setTimeout(() => {
+      process.emit("SIGTERM", "SIGTERM");
+    }, 0);
+
+    try {
+      await runCli(["node", "clawrma", "solver", "run"]);
+    } finally {
+      clearTimeout(emitSignal);
+    }
+
+    expect(startSolverMock).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: "cr_sk_test" }),
+    );
+    expect(stopMock).toHaveBeenCalledTimes(1);
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "Solver runtime started. Press Ctrl+C to stop.",
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "Received SIGTERM. Stopping solver runtime...",
+    );
+    expect(consoleSpy).toHaveBeenCalledWith("Solver runtime stopped.");
+  });
+
+  it("prints infer errors to stderr and sets exit code in handled mode", async () => {
+    readConfigMock.mockResolvedValue(null);
+    const { io, stderr } = createCliIo();
+
+    await runCli(["node", "clawrma", "infer", "Hello"], io, true);
+
+    expect(stderr()).toContain(
+      "Clawrma is not configured. Run 'npx clawrma auth setup' to create",
+    );
+    expect(process.exitCode).toBe(1);
+  });
+});

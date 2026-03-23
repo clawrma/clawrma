@@ -1,0 +1,77 @@
+{
+  "name": "clawrma",
+  "version": "0.1.0",
+  "description": "CLI and SDK for the Clawrma solver network - delegate web tasks to distributed solvers.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clawrma/clawrma.git"
+  },
+  "homepage": "https://github.com/clawrma/clawrma",
+  "bugs": {
+    "url": "https://github.com/clawrma/clawrma/issues"
+  },
+  "author": "Clawrma contributors",
+  "keywords": [
+    "clawrma",
+    "cli",
+    "ai-agent",
+    "solver-network",
+    "typescript"
+  ],
+  "bin": {
+    "clawrma": "./dist/cli.js"
+  },
+  "exports": {
+    "./client": {
+      "types": "./dist/src/client.d.ts",
+      "default": "./dist/src/client.js"
+    },
+    "./types": {
+      "types": "./dist/src/types.d.ts",
+      "default": "./dist/src/types.js"
+    },
+    "./config": {
+      "types": "./dist/src/config.d.ts",
+      "default": "./dist/src/config.js"
+    },
+    "./constants": {
+      "types": "./dist/src/constants.d.ts",
+      "default": "./dist/src/constants.js"
+    }
+  },
+  "files": [
+    "dist/"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "test": "vitest run src",
+    "test:live": "vitest run tests/e2e tests/integration",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm test && npm run build"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "pino": "^9.3.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.13.5",
+    "@types/ws": "^8.5.13",
+    "eslint": "^10.0.3",
+    "globals": "^17.4.0",
+    "prettier": "^3.8.1",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.57.1",
+    "vite": "^6.4.1",
+    "vitest": "^3.2.4"
+  }
+}

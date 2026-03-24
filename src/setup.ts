@@ -130,43 +130,18 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     const apiBaseUrl = options.apiBaseUrl ?? DEFAULT_API_BASE_URL;
     const existingAccount = await resolveExistingAccount(apiBaseUrl);
 
-    const shouldSkipCapabilityDetection =
-      !interactive && options.framework === "none";
-    let detection: DetectionResult;
-    if (shouldSkipCapabilityDetection) {
-      emitNotice(
-        "Skipping capability detection for --framework none in non-interactive setup; using defaults.",
-      );
-      detection = {
-        providers: [],
-        browserAvailable: false,
-        notificationChannels: [],
-        activeHours: null,
-        existingSearchConfig: false,
-        existingFirecrawlConfig: false,
-      };
-    } else {
-      detection = await detectCapabilities(options.framework);
-    }
-
     if (!interactive) {
       const missing: string[] = [];
       if (options.solver === undefined) missing.push("--solver <on|off>");
-      if (options.schedule === undefined) missing.push("--schedule <preset>");
+      if (options.solver === "on" && options.schedule === undefined) {
+        missing.push("--schedule <preset>");
+      }
       if (missing.length > 0) {
         throw new Error(
           `Non-interactive setup requires these flags: ${missing.join(", ")}`,
         );
       }
     }
-    for (const provider of detection.providers) {
-      emitDetected(
-        `${provider.name} (${provider.billingType}, ${provider.fulfillmentPath}) ${provider.endpoint}`,
-      );
-    }
-    emitNotice(
-      "Sandboxed or containerized agents may have restricted behavior. Review your environment manually before enabling deeper framework integration.",
-    );
 
     const solverEnabled = await resolveSolverEnabled(
       interactive,
@@ -175,30 +150,61 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     );
     const openClawConfig =
       options.framework === "openclaw" ? await readOpenClawConfig() : null;
-    const schedule = await resolveSchedule(
-      options.framework,
-      interactive,
-      prompts.ask,
-      options.schedule,
-      detection.activeHours,
-      openClawConfig?.activeHoursTimezone ?? null,
-    );
+    let detection: DetectionResult | null = null;
+    if (solverEnabled) {
+      const shouldSkipCapabilityDetection =
+        !interactive && options.framework === "none";
+      if (shouldSkipCapabilityDetection) {
+        emitNotice(
+          "Skipping capability detection for --framework none in non-interactive setup; using defaults.",
+        );
+        detection = {
+          providers: [],
+          browserAvailable: false,
+          notificationChannels: [],
+          activeHours: null,
+          existingSearchConfig: false,
+          existingFirecrawlConfig: false,
+        };
+      } else {
+        detection = await detectCapabilities(options.framework, {
+          includeNotificationChannels: false,
+        });
+      }
 
-    const hasPerTokenProviders = detection.providers.some(
-      (provider) => provider.billingType === "per_token",
-    );
-    if (hasPerTokenProviders) {
+      for (const provider of detection.providers) {
+        emitDetected(
+          `${provider.name} (${provider.billingType}, ${provider.fulfillmentPath}) ${provider.endpoint}`,
+        );
+      }
+      emitNotice(
+        "Sandboxed or containerized agents may have restricted behavior. Review your environment manually before enabling deeper framework integration.",
+      );
+    }
+    const schedule = solverEnabled
+      ? await resolveSchedule(
+          options.framework,
+          interactive,
+          prompts.ask,
+          options.schedule,
+          detection?.activeHours ?? null,
+          openClawConfig?.activeHoursTimezone ?? null,
+        )
+      : buildDisabledSolverSchedule(
+          openClawConfig?.activeHoursTimezone ?? null,
+        );
+
+    if (
+      detection?.providers.some(
+        (provider) => provider.billingType === "per_token",
+      )
+    ) {
       emitNotice(
         "Per-token providers are excluded from inference solving by default to avoid unexpected API costs.",
       );
     }
 
-    const notifications = await resolveNotifications(
-      options.framework,
-      detection.notificationChannels,
-      interactive,
-      prompts.ask,
-    );
+    const notifications = defaultNotifications();
 
     const gatewayConfig = resolveGatewayConfig();
     const { accountId, apiKey } =
@@ -209,6 +215,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     }
 
     if (
+      solverEnabled &&
       options.framework === "openclaw" &&
       options.webFetchFallback === "yes"
     ) {
@@ -254,19 +261,21 @@ export async function runSetup(options: SetupOptions): Promise<void> {
 
     emitTell("⚡ Clawrma");
     emitTell(`  ✓ Registered            ${truncateKey(apiKey)}`);
-    emitTell(
-      `  ✓ Capabilities          ${detection.providers.map((p) => p.name).join(", ") || "none"}`,
-    );
-    emitTell(
-      "  ✓ Integration note      review sandbox/container limits before deeper framework integration",
-    );
-    emitTell(`  ✓ Solver scope          ${LOCAL_SOLVER_TASK_TYPES.join(", ")}`);
-    emitTell(
-      `  ✓ Solver configured     ${solverEnabled ? "enabled" : "disabled"}`,
-    );
-    emitTell(
-      "  ✓ Domain policy        popular sites only (change: npx clawrma solver domains open)",
-    );
+    if (solverEnabled && detection) {
+      emitTell(
+        `  ✓ Capabilities          ${detection.providers.map((p) => p.name).join(", ") || "none"}`,
+      );
+      emitTell(
+        "  ✓ Integration note      review sandbox/container limits before deeper framework integration",
+      );
+      emitTell(
+        `  ✓ Solver scope          ${LOCAL_SOLVER_TASK_TYPES.join(", ")}`,
+      );
+      emitTell("  ✓ Solver configured     enabled");
+      emitTell(
+        "  ✓ Domain policy        popular sites only (change: npx clawrma solver domains open)",
+      );
+    }
     emitTell(
       `  Balance     ${statusBalance.toFixed(2)} points (welcome credit)`,
     );
@@ -383,6 +392,20 @@ async function resolveSchedule(
   };
 }
 
+function buildDisabledSolverSchedule(
+  activeHoursTimezone: string | null,
+): ClawrmaConfig["solver"]["schedule"] {
+  const timezone =
+    activeHoursTimezone ??
+    (Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
+  return {
+    preset: "overnight",
+    source: "manual",
+    timezone,
+    windows: buildScheduleFromPreset("overnight", null),
+  };
+}
+
 async function askSchedulePreset(
   interactive: boolean,
   askPrompt: AskPrompt,
@@ -472,47 +495,9 @@ function firstDefined(values: Array<string | undefined>): string | undefined {
   return undefined;
 }
 
-async function resolveNotifications(
-  framework: FrameworkType,
-  channels: string[],
-  interactive: boolean,
-  askPrompt: AskPrompt,
-): Promise<ClawrmaConfig["notifications"]> {
-  const defaultChannel = channels[0] ?? "";
-
-  if (framework === "none" || channels.length === 0) {
-    return {
-      channel: null,
-      target: "",
-      earningsThreshold: DEFAULT_EARNINGS_THRESHOLD_POINTS,
-      dailySummary: true,
-    };
-  }
-
-  if (channels.length === 1) {
-    emitDetected(`Notification channel: ${defaultChannel}`);
-    return {
-      channel: defaultChannel,
-      target: "",
-      earningsThreshold: DEFAULT_EARNINGS_THRESHOLD_POINTS,
-      dailySummary: true,
-    };
-  }
-
-  const answer = await askPrompt(
-    `Choose notification channel: ${channels.join(", ")}`,
-  );
-  if (!interactive) {
-    return {
-      channel: defaultChannel,
-      target: "",
-      earningsThreshold: DEFAULT_EARNINGS_THRESHOLD_POINTS,
-      dailySummary: true,
-    };
-  }
-
+function defaultNotifications(): ClawrmaConfig["notifications"] {
   return {
-    channel: channels.includes(answer) ? answer : defaultChannel,
+    channel: null,
     target: "",
     earningsThreshold: DEFAULT_EARNINGS_THRESHOLD_POINTS,
     dailySummary: true,

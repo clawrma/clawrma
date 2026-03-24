@@ -36,6 +36,7 @@ interface LocalProviderProbe {
 
 export async function detectCapabilities(
   framework: FrameworkType,
+  options: { includeNotificationChannels?: boolean } = {},
 ): Promise<DetectionResult> {
   if (framework === "none") {
     const [browserAvailable, localProviders] = await Promise.all([
@@ -62,7 +63,9 @@ export async function detectCapabilities(
     readOpenClawConfig(),
     detectPlaywrightAvailability(),
     detectCliAvailability(),
-    detectNotificationChannels(),
+    options.includeNotificationChannels === false
+      ? Promise.resolve<string[]>([])
+      : detectNotificationChannels(),
   ]);
 
   const providers = (openClawConfig?.providers ?? []).map((provider) =>

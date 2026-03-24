@@ -261,10 +261,7 @@ describe("runSetup non-interactive mode", () => {
     mocks.readOpenClawConfig.mockResolvedValue(null);
     mocks.writeConfig.mockResolvedValue(undefined);
     mocks.createInterface.mockReturnValue({
-      question: vi
-        .fn()
-        .mockResolvedValueOnce("n")
-        .mockResolvedValueOnce("overnight"),
+      question: vi.fn().mockResolvedValueOnce("n"),
       close: vi.fn(),
     });
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -281,6 +278,113 @@ describe("runSetup non-interactive mode", () => {
       "Inject clawrma/strong into fallback chain",
     );
     expect(mocks.injectProvider).not.toHaveBeenCalled();
+  });
+
+  it("does not prompt for notification channels during interactive solver setup", async () => {
+    mocks.detectCapabilities.mockResolvedValue({
+      ...makeDetectionResult(),
+      notificationChannels: ["telegram", "slack"],
+    });
+    mocks.registerAccount.mockResolvedValue({
+      accountId: "cr_usr_test",
+      apiKey: "cr_sk_test",
+    });
+    mocks.getStatus.mockResolvedValue(makeStatusResponse());
+    mocks.writeClawrmaApiKey.mockResolvedValue(undefined);
+    mocks.readOpenClawConfig.mockResolvedValue(null);
+    mocks.writeConfig.mockResolvedValue(undefined);
+    const question = vi
+      .fn()
+      .mockResolvedValueOnce("y")
+      .mockResolvedValueOnce("overnight");
+    mocks.createInterface.mockReturnValue({
+      question,
+      close: vi.fn(),
+    });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await runSetup({
+      framework: "openclaw",
+      interactive: true,
+    });
+
+    expect(question).toHaveBeenCalledTimes(2);
+    const combinedOutput = logSpy.mock.calls
+      .map((call) => String(call[0] ?? ""))
+      .join("\n");
+    expect(combinedOutput).not.toContain("Notification channel:");
+    expect(combinedOutput).not.toContain("Choose notification channel:");
+    expect(mocks.writeConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        notifications: {
+          channel: null,
+          target: "",
+          earningsThreshold: 1,
+          dailySummary: true,
+        },
+      }),
+    );
+  });
+
+  it("skips the schedule prompt when the user declines solving and keeps an overnight schedule", async () => {
+    mocks.detectCapabilities.mockResolvedValue(makeDetectionResult());
+    mocks.registerAccount.mockResolvedValue({
+      accountId: "cr_usr_test",
+      apiKey: "cr_sk_test",
+    });
+    mocks.getStatus.mockResolvedValue(makeStatusResponse());
+    mocks.writeClawrmaApiKey.mockResolvedValue(undefined);
+    mocks.readOpenClawConfig.mockResolvedValue(null);
+    mocks.writeConfig.mockResolvedValue(undefined);
+    const question = vi.fn().mockResolvedValueOnce("n");
+    mocks.createInterface.mockReturnValue({
+      question,
+      close: vi.fn(),
+    });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await runSetup({
+      framework: "openclaw",
+      interactive: true,
+    });
+
+    expect(question).toHaveBeenCalledTimes(1);
+    expect(mocks.detectCapabilities).not.toHaveBeenCalled();
+    expect(mocks.writeConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        solver: expect.objectContaining({
+          enabled: false,
+          schedule: expect.objectContaining({
+            preset: "overnight",
+            source: "manual",
+            windows: [
+              { days: expect.any(Array), start: "00:00", end: "06:00" },
+            ],
+          }),
+        }),
+      }),
+    );
+    const combinedOutput = logSpy.mock.calls
+      .map((call) => String(call[0] ?? ""))
+      .join("\n");
+    expect(combinedOutput).not.toContain("Choose schedule preset");
+    expect(combinedOutput).not.toContain("[DETECTED]");
+    expect(combinedOutput).not.toContain(
+      "Sandboxed or containerized agents may have restricted behavior.",
+    );
+    expect(combinedOutput).not.toContain("Notification channel:");
+    expect(combinedOutput).not.toContain("Choose notification channel:");
+    expect(combinedOutput).not.toContain(
+      "Per-token providers are excluded from inference solving by default to avoid unexpected API costs.",
+    );
+    expect(combinedOutput).not.toContain(
+      "Firecrawl web_fetch fallback setup is disabled in this launch phase; OpenClaw config was not changed.",
+    );
+    expect(combinedOutput).not.toContain("✓ Capabilities");
+    expect(combinedOutput).not.toContain("review sandbox/container limits");
+    expect(combinedOutput).not.toContain("✓ Solver scope");
+    expect(combinedOutput).not.toContain("✓ Solver configured");
+    expect(combinedOutput).not.toContain("✓ Domain policy");
   });
 
   it("skips capability detection for framework none in non-interactive mode", async () => {
@@ -307,7 +411,42 @@ describe("runSetup non-interactive mode", () => {
     expect(mocks.injectProvider).not.toHaveBeenCalled();
   });
 
-  it("reports solver as configured but disabled when setup leaves solving off", async () => {
+  it("does not require schedule in non-interactive mode when solving is off", async () => {
+    mocks.detectCapabilities.mockRejectedValue(
+      new Error("detect should be skipped"),
+    );
+    mocks.registerAccount.mockResolvedValue({
+      accountId: "cr_usr_test",
+      apiKey: "cr_sk_test",
+    });
+    mocks.getStatus.mockResolvedValue(makeStatusResponse());
+    mocks.writeConfig.mockResolvedValue(undefined);
+
+    await expect(
+      runSetup({
+        framework: "none",
+        interactive: false,
+        solver: "off",
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(mocks.writeConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        solver: expect.objectContaining({
+          enabled: false,
+          schedule: expect.objectContaining({
+            preset: "overnight",
+            source: "manual",
+            windows: [
+              { days: expect.any(Array), start: "00:00", end: "06:00" },
+            ],
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("omits solver-specific detection and summary output when setup leaves solving off", async () => {
     mocks.registerAccount.mockResolvedValue({
       accountId: "cr_usr_test",
       apiKey: "cr_sk_test",
@@ -327,8 +466,59 @@ describe("runSetup non-interactive mode", () => {
     const combinedOutput = logSpy.mock.calls
       .map((call) => String(call[0] ?? ""))
       .join("\n");
-    expect(combinedOutput).toContain("✓ Solver configured     disabled");
+    expect(mocks.detectCapabilities).not.toHaveBeenCalled();
+    expect(combinedOutput).not.toContain(
+      "Skipping capability detection for --framework none in non-interactive setup; using defaults.",
+    );
+    expect(combinedOutput).not.toContain("[DETECTED]");
+    expect(combinedOutput).not.toContain("✓ Capabilities");
+    expect(combinedOutput).not.toContain("review sandbox/container limits");
+    expect(combinedOutput).not.toContain("✓ Solver scope");
+    expect(combinedOutput).not.toContain("✓ Solver configured");
+    expect(combinedOutput).not.toContain("✓ Domain policy");
     expect(combinedOutput).not.toContain("Run: npx clawrma solver run");
+  });
+
+  it("skips solver-only messages in non-interactive openclaw setup when solving is off", async () => {
+    mocks.registerAccount.mockResolvedValue({
+      accountId: "cr_usr_test",
+      apiKey: "cr_sk_test",
+    });
+    mocks.getStatus.mockResolvedValue(makeStatusResponse());
+    mocks.writeClawrmaApiKey.mockResolvedValue(undefined);
+    mocks.readOpenClawConfig.mockResolvedValue(null);
+    mocks.writeConfig.mockResolvedValue(undefined);
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await runSetup({
+      framework: "openclaw",
+      interactive: false,
+      solver: "off",
+      webFetchFallback: "yes",
+    });
+
+    const combinedOutput = logSpy.mock.calls
+      .map((call) => String(call[0] ?? ""))
+      .join("\n");
+    expect(mocks.detectCapabilities).not.toHaveBeenCalled();
+    expect(combinedOutput).not.toContain("[DETECTED]");
+    expect(combinedOutput).not.toContain(
+      "Sandboxed or containerized agents may have restricted behavior.",
+    );
+    expect(combinedOutput).not.toContain("Notification channel:");
+    expect(combinedOutput).not.toContain("Choose notification channel:");
+    expect(combinedOutput).not.toContain(
+      "Per-token providers are excluded from inference solving by default to avoid unexpected API costs.",
+    );
+    expect(combinedOutput).not.toContain(
+      "Firecrawl web_fetch fallback setup is disabled in this launch phase; OpenClaw config was not changed.",
+    );
+    expect(combinedOutput).not.toContain("✓ Capabilities");
+    expect(combinedOutput).not.toContain("review sandbox/container limits");
+    expect(combinedOutput).not.toContain("✓ Solver scope");
+    expect(combinedOutput).not.toContain("✓ Solver configured");
+    expect(combinedOutput).not.toContain("✓ Domain policy");
   });
 
   it("reuses an existing account for the same api base url", async () => {

@@ -1,6 +1,21 @@
 ---
 name: clawrma
 description: Use Clawrma for web fetch, web search, screenshots, snapshots, and solver-backed inference, especially when built-in tools are not configured, blocked, expensive without the need for 3rd party API keys. Clawrma can also run a solver to earn credits for future tasks and reduce direct API spend.
+metadata:
+  openclaw:
+    tags:
+      - web-fetch
+      - web-search
+      - screenshot
+      - inference
+      - agentic-workflow
+      - automation
+    requires:
+      env:
+        - CLAWRMA_API_KEY
+      bins:
+        - npx
+    primaryEnv: CLAWRMA_API_KEY
 ---
 
 # Clawrma
@@ -22,13 +37,13 @@ If setup or auth fails, follow the CLI remediation output.
 
 ## Command Map
 
-`npx clawrma fetch <url>` fetch URL content as JSON
-`npx clawrma search <query>` run web search as JSON
-`npx clawrma screenshot <url>` capture a screenshot
-`npx clawrma snapshot <url>` capture structured page data
-`npx clawrma infer "<prompt>"` run solver-backed inference
-`npx clawrma status` show balance, solver state, and capabilities
-`npx clawrma balance` show account balance
+- `npx clawrma fetch <url>`: fetch URL content as JSON
+- `npx clawrma search <query>`: run web search as JSON
+- `npx clawrma screenshot <url>`: capture a screenshot
+- `npx clawrma snapshot <url>`: capture structured page data
+- `npx clawrma infer "<prompt>"`: run solver-backed inference
+- `npx clawrma status`: show balance, solver state, and capabilities
+- `npx clawrma balance`: show account balance
 
 ## Usage Notes
 

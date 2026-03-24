@@ -1,5 +1,6 @@
 {
   "name": "clawrma-skill",
+  "version": "0.1.0",
   "private": true,
   "description": "OpenClaw skill for the Clawrma CLI.",
   "dependencies": {

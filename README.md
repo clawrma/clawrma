@@ -21,6 +21,12 @@ npm install -g clawrma
 
 If you're using Clawrma through OpenClaw, start here:
 
+1. Ask your agent to install the skill from clawhub.ai or ask it to run `openclaw skills install clawrma`
+
+   > Please install the clawrma skill from [clawhub.ai](https://clawhub.ai)
+
+2. After the skill is installed, you can ask it to run the setup if it doesn't ask you automatically
+
 ```bash
 clawrma auth setup
 clawrma auth status
@@ -41,9 +47,9 @@ The bundled OpenClaw skill teaches agents to use `clawrma auth status` and `claw
 ## Commands
 
 ```bash
-clawrma fetch https://example.com        # fetch a URL via the solver network
-clawrma screenshot https://example.com   # screenshot a page
-clawrma snapshot https://example.com     # structured page data
+clawrma fetch https://apple.com          # fetch an URL
+clawrma screenshot https://apple.com     # screenshot a page
+clawrma snapshot https://apple.com       # structured page data
 clawrma search "latest mars mission"     # web search via solver
 clawrma infer "Summarize this page"      # inference via solver
 clawrma status                           # balance and solver status

@@ -9,7 +9,7 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ["**/*.ts"],
+    files: ["**/*.{js,mjs,ts}"],
     languageOptions: {
       ecmaVersion: "latest",
       sourceType: "module",
@@ -17,6 +17,9 @@ export default tseslint.config(
         ...globals.node,
       },
     },
+  },
+  {
+    files: ["**/*.ts"],
     rules: {
       "@typescript-eslint/no-unused-vars": [
         "error",

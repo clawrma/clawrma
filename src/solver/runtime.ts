@@ -52,6 +52,8 @@ import {
   type SolverRuntimeState,
 } from "./capabilities.js";
 import type {
+  InferenceAssistantMessage,
+  InferenceChunk,
   LlmTaskPayload,
   TaskAssignment,
   TaskErrorCategory,
@@ -64,7 +66,6 @@ import {
   fulfillViaClaudeCli,
   fulfillViaCodexCli,
   resolveProviderRuntimeConfig,
-  type InferenceChunk,
   type ProviderResolver,
   type SpawnImpl,
 } from "./inference.js";
@@ -81,11 +82,8 @@ const LOW_BALANCE_THRESHOLD_POINTS = 50;
 interface OutboundTaskMessage {
   type: "task_chunk" | "task_complete" | "task_error";
   task_id: string;
-  chunk?: {
-    content: string;
-    finish_reason?: string;
-  };
-  result?: Record<string, unknown>;
+  chunk?: InferenceChunk;
+  result?: Record<string, unknown> | InferenceAssistantMessage;
   usage?: TaskUsage;
   error?: string;
   category?: TaskErrorCategory;
@@ -543,18 +541,22 @@ export class SolverRuntime implements SolverHandle {
       const result =
         fulfillmentPath === "cli"
           ? await fulfillViaClaudeCli({
+              taskId,
               payload: payload as LlmTaskPayload,
               modelName,
               spawnImpl: this.spawnImpl,
               cliTimeoutMs: this.cliTimeoutMs,
+              cliSandbox: this.config.solver.cliSandbox,
               onChunk: emitChunk,
             })
           : fulfillmentPath === "cli_codex"
             ? await fulfillViaCodexCli({
+                taskId,
                 payload: payload as LlmTaskPayload,
                 modelName,
                 spawnImpl: this.spawnImpl,
                 cliTimeoutMs: this.cliTimeoutMs,
+                cliSandbox: this.config.solver.cliSandbox,
                 onChunk: emitChunk,
               })
             : await fulfillViaApi({
@@ -573,6 +575,7 @@ export class SolverRuntime implements SolverHandle {
       this.sendTaskMessage({
         type: "task_complete",
         task_id: taskId,
+        ...(result.result ? { result: result.result } : {}),
         usage: result.usage,
       });
     } catch (error: unknown) {

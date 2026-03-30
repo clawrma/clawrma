@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0 - 2026-03-30
+
+- **Tool-capable CLI inference**: CLI-backed inference now preserves full conversation history and structured tool-call output
+- **Sandboxed Codex runtime**: Codex CLI inference now runs from a Clawrma-owned per-task workspace with an explicit `workspace-write` sandbox and a scrubbed child environment
+
 ## 0.1.1 - 2026-03-25
 
 - **Auth setup flow**: `clawrma auth setup` improved flow for weaker models

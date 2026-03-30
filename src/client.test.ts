@@ -343,6 +343,108 @@ describe("client API behavior", () => {
     expect(headers["x-safety-scan"]).toBeUndefined();
   });
 
+  it("preserves structured inference messages and tool config in chat-completions requests", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const payload: Parameters<typeof requestChatCompletions>[2] = {
+      model: "clawrma/strong",
+      stream: false,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "Run ls",
+            },
+          ],
+        },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "exec",
+            parameters: {
+              type: "object",
+            },
+          },
+        },
+      ],
+      tool_choice: {
+        type: "function",
+        function: {
+          name: "exec",
+        },
+      },
+      parallel_tool_calls: false,
+    };
+
+    await requestChatCompletions(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      payload,
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com/v1/inference/chat/completions",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    );
+  });
+
+  it("allows typed input_text inference content parts in chat-completions requests", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const payload: Parameters<typeof requestChatCompletions>[2] = {
+      model: "clawrma/strong",
+      stream: false,
+      messages: [
+        {
+          role: "system",
+          content: [
+            {
+              type: "input_text",
+              input_text: "Stay concise.",
+            },
+            {
+              type: "text",
+              text: "Use bash syntax.",
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: "Run pwd",
+        },
+      ],
+    };
+
+    await requestChatCompletions(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      payload,
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com/v1/inference/chat/completions",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    );
+  });
+
   it("surfaces non-404 capability errors", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ detail: "unauthorized" }), {

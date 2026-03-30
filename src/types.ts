@@ -96,6 +96,20 @@ export interface SolverSchedule {
 }
 
 /**
+ * Narrow CLI hardening settings for local inference execution.
+ */
+export interface CliSandboxConfig {
+  /**
+   * Optional root directory for per-task CLI workspaces.
+   */
+  workspaceRoot?: string;
+  /**
+   * Retain failed task workspaces for debugging.
+   */
+  retainFailedWorkspaces?: boolean;
+}
+
+/**
  * Canonical Clawrma configuration persisted to disk.
  */
 export interface ClawrmaConfig {
@@ -143,6 +157,10 @@ export interface ClawrmaConfig {
      * Domain routing policy for browser tasks.
      */
     domainPolicy: DomainPolicy;
+    /**
+     * Optional CLI hardening settings for local inference execution.
+     */
+    cliSandbox?: CliSandboxConfig;
   };
   /**
    * Inference requester guardrails.

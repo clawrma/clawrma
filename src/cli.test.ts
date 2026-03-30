@@ -701,6 +701,23 @@ describe("task convenience commands", () => {
     expect(stdout()).toBe("hello world\n");
   });
 
+  it("renders streaming tool-call deltas as tagged JSON lines", async () => {
+    requestChatCompletionsMock.mockResolvedValue(
+      createSseResponse([
+        'data: {"object":"chat.completion.chunk","choices":[{"delta":{"content":"Running"}}]}',
+        'data: {"object":"chat.completion.chunk","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_123","type":"function","function":{"name":"exec","arguments":"{\\"cmd\\":\\"ls\\"}"}}]}}]}',
+        "data: [DONE]",
+      ]),
+    );
+    const { io, stdout } = createCliIo();
+
+    await runCli(["node", "clawrma", "infer", "Run ls"], io);
+
+    expect(stdout()).toBe(
+      'Running\n[tool_call_delta] {"index":0,"id":"call_123","type":"function","function":{"name":"exec","arguments":"{\\"cmd\\":\\"ls\\"}"}}\n',
+    );
+  });
+
   it("prints non-streaming inference responses to stdout", async () => {
     requestChatCompletionsMock.mockResolvedValue(
       new Response(
@@ -733,6 +750,45 @@ describe("task convenience commands", () => {
       },
     );
     expect(stdout()).toBe("Full response\n");
+  });
+
+  it("renders non-streaming assistant tool_calls as tagged JSON lines", async () => {
+    requestChatCompletionsMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          object: "chat.completion",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: "Running",
+                tool_calls: [
+                  {
+                    id: "call_123",
+                    type: "function",
+                    function: {
+                      name: "exec",
+                      arguments: '{"cmd":"ls"}',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    const { io, stdout } = createCliIo();
+
+    await runCli(["node", "clawrma", "infer", "--no-stream", "Run ls"], io);
+
+    expect(stdout()).toBe(
+      'Running\n[tool_call] {"id":"call_123","type":"function","function":{"name":"exec","arguments":"{\\"cmd\\":\\"ls\\"}"}}\n',
+    );
   });
 
   it("builds inference messages with a system prompt", async () => {

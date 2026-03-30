@@ -185,6 +185,24 @@ describe("config read/write", () => {
     await expect(readConfig()).resolves.toEqual(config);
   });
 
+  it("round-trips optional solver cliSandbox settings", async () => {
+    const { writeConfig, readConfig } = await import("./config.js");
+    const config = {
+      ...makeConfig(),
+      solver: {
+        ...makeConfig().solver,
+        cliSandbox: {
+          workspaceRoot: "/tmp/clawrma-workspaces",
+          retainFailedWorkspaces: true,
+        },
+      },
+    };
+
+    await writeConfig(config);
+
+    await expect(readConfig()).resolves.toEqual(config);
+  });
+
   it("throws when persisted config fails schema validation", async () => {
     const { readConfig } = await import("./config.js");
 
@@ -194,6 +212,29 @@ describe("config read/write", () => {
       JSON.stringify({
         version: 1,
         accountId: "cr_usr_test",
+      }),
+      "utf8",
+    );
+
+    await expect(readConfig()).rejects.toThrow(
+      "does not match ClawrmaConfig schema",
+    );
+  });
+
+  it("rejects invalid solver cliSandbox settings from disk", async () => {
+    const { readConfig } = await import("./config.js");
+
+    await mkdir(testPaths.configDir, { recursive: true });
+    await writeFile(
+      testPaths.configPath,
+      JSON.stringify({
+        ...makeConfig(),
+        solver: {
+          ...makeConfig().solver,
+          cliSandbox: {
+            retainFailedWorkspaces: "yes",
+          },
+        },
       }),
       "utf8",
     );

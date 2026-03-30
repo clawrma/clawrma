@@ -1,3 +1,9 @@
+import { EventEmitter } from "node:events";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -29,6 +35,37 @@ import {
   type IdleDetector,
   type SolverRuntimeDependencies,
 } from "./solver.js";
+
+function makeMockProcess(
+  lines: string[],
+  exitCode = 0,
+  stderrText = "",
+): ChildProcessWithoutNullStreams {
+  const process = new EventEmitter() as ChildProcessWithoutNullStreams;
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+
+  Object.assign(process, {
+    stdin,
+    stdout,
+    stderr,
+    exitCode: null,
+    kill: vi.fn(),
+  });
+
+  setTimeout(() => {
+    for (const line of lines) {
+      stdout.write(`${line}\n`);
+    }
+    stdout.end();
+    stderr.end(stderrText);
+    (process as unknown as { exitCode: number | null }).exitCode = exitCode;
+    process.emit("close", exitCode);
+  }, 0);
+
+  return process;
+}
 
 class FakeWebSocketManager implements WebSocketManager {
   public sent: object[] = [];
@@ -419,7 +456,7 @@ describe("solver runtime dispatch", () => {
         getMessagesByType(fakeWs.sent, "task_chunk").find(
           (entry) => entry.task_id === "task_api_1",
         )?.chunk,
-      ).toMatchObject({ content: "hello" });
+      ).toMatchObject({ type: "text_delta", text: "hello" });
       expect(
         getMessagesByType(fakeWs.sent, "task_complete").find(
           (entry) => entry.task_id === "task_api_1",
@@ -436,6 +473,291 @@ describe("solver runtime dispatch", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       await handle.stop();
+    }
+  });
+
+  it("forwards structured tool-call chunks and terminal assistant state for llm_inference", async () => {
+    const fakeWs = new FakeWebSocketManager();
+    const streamedBody = [
+      'data: {"object":"chat.completion.chunk","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_123","type":"function","function":{"name":"exec","arguments":"{\\"cmd\\":\\"ls\\"}"}}]}}]}',
+      'data: {"object":"chat.completion.chunk","choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_123","type":"function","function":{"name":"exec","arguments":"{\\"cmd\\":\\"ls\\"}"}}]}}]}',
+      'data: {"object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":340}}',
+      "data: [DONE]",
+    ].join("\n");
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(streamedBody, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+
+    const handle = await startSolver(
+      makeConfig({
+        preset: "idle-always",
+        source: "manual",
+        timezone: "UTC",
+        windows: [
+          {
+            days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            start: "00:00",
+            end: "00:00",
+          },
+        ],
+      }),
+      {
+        wsFactory: () => fakeWs,
+        fetchImpl: fetchMock,
+        providerResolver: async () => ({
+          endpoint: "https://openrouter.ai/api/v1",
+          apiKey: "sk-or-test",
+        }),
+        now: () => new Date("2026-02-23T12:00:00.000Z"),
+      },
+    );
+
+    try {
+      fakeWs.emitMessage({
+        type: "task_assignment",
+        task_id: "task_api_tool_call",
+        task_type: "llm_inference",
+        capability: {
+          fulfillment_path: "api",
+          provider_name: "openrouter",
+          model_name: "openai/gpt-4o-mini",
+        },
+        payload: {
+          messages: [{ role: "user", content: "Run ls" }],
+        },
+      });
+
+      await waitFor(() =>
+        getMessagesByType(fakeWs.sent, "task_complete").some(
+          (entry) => entry.task_id === "task_api_tool_call",
+        ),
+      );
+
+      expect(
+        getMessagesByType(fakeWs.sent, "task_chunk").find(
+          (entry) => entry.task_id === "task_api_tool_call",
+        )?.chunk,
+      ).toEqual({
+        type: "tool_call_delta",
+        tool_call: {
+          index: 0,
+          id: "call_123",
+          type: "function",
+          function: {
+            name: "exec",
+            arguments: '{"cmd":"ls"}',
+          },
+        },
+      });
+      expect(
+        getMessagesByType(fakeWs.sent, "task_complete").find(
+          (entry) => entry.task_id === "task_api_tool_call",
+        ),
+      ).toEqual({
+        type: "task_complete",
+        task_id: "task_api_tool_call",
+        result: {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: "call_123",
+              type: "function",
+              function: {
+                name: "exec",
+                arguments: '{"cmd":"ls"}',
+              },
+            },
+          ],
+        },
+        usage: {
+          input_tokens: 1200,
+          output_tokens: 340,
+        },
+      });
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it("forwards structured CLI-originated tool-call chunks and terminal assistant state for llm_inference", async () => {
+    const fakeWs = new FakeWebSocketManager();
+
+    const handle = await startSolver(
+      makeConfig({
+        preset: "idle-always",
+        source: "manual",
+        timezone: "UTC",
+        windows: [
+          {
+            days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            start: "00:00",
+            end: "00:00",
+          },
+        ],
+      }),
+      {
+        wsFactory: () => fakeWs,
+        spawnImpl: vi.fn(() =>
+          makeMockProcess([
+            '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Running"}}',
+            '{"type":"item.completed","item":{"id":"call_123","type":"mcp_tool_call","server":"workspace","tool":"exec","arguments":{"cmd":"ls"}}}',
+            '{"type":"turn.completed","usage":{"input_tokens":1200,"output_tokens":340}}',
+          ]),
+        ),
+        now: () => new Date("2026-02-23T12:00:00.000Z"),
+      },
+    );
+
+    try {
+      fakeWs.emitMessage({
+        type: "task_assignment",
+        task_id: "task_cli_tool_call",
+        task_type: "llm_inference",
+        capability: {
+          fulfillment_path: "cli_codex",
+          provider_name: "openai-codex",
+          model_name: "gpt-5.3-codex",
+        },
+        payload: {
+          messages: [{ role: "user", content: "Run ls" }],
+        },
+      });
+
+      await waitFor(() =>
+        getMessagesByType(fakeWs.sent, "task_complete").some(
+          (entry) => entry.task_id === "task_cli_tool_call",
+        ),
+      );
+
+      expect(
+        getMessagesByType(fakeWs.sent, "task_chunk").filter(
+          (entry) => entry.task_id === "task_cli_tool_call",
+        ),
+      ).toEqual([
+        {
+          type: "task_chunk",
+          task_id: "task_cli_tool_call",
+          chunk: {
+            type: "text_delta",
+            text: "Running",
+          },
+        },
+        {
+          type: "task_chunk",
+          task_id: "task_cli_tool_call",
+          chunk: {
+            type: "tool_call_delta",
+            tool_call: {
+              index: 0,
+              id: "call_123",
+              type: "function",
+              function: {
+                name: "workspace.exec",
+                arguments: '{"cmd":"ls"}',
+              },
+            },
+          },
+        },
+      ]);
+      expect(
+        getMessagesByType(fakeWs.sent, "task_complete").find(
+          (entry) => entry.task_id === "task_cli_tool_call",
+        ),
+      ).toEqual({
+        type: "task_complete",
+        task_id: "task_cli_tool_call",
+        result: {
+          role: "assistant",
+          content: "Running",
+          tool_calls: [
+            {
+              id: "call_123",
+              type: "function",
+              function: {
+                name: "workspace.exec",
+                arguments: '{"cmd":"ls"}',
+              },
+            },
+          ],
+        },
+        usage: {
+          input_tokens: 1200,
+          output_tokens: 340,
+        },
+      });
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it("uses the configured dedicated workspace root for CLI-backed llm_inference tasks", async () => {
+    const fakeWs = new FakeWebSocketManager();
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "clawrma-solver-runtime-workspaces-"),
+    );
+    let spawnedCwd = "";
+
+    const config = makeConfig({
+      preset: "idle-always",
+      source: "manual",
+      timezone: "UTC",
+      windows: [
+        {
+          days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+          start: "00:00",
+          end: "00:00",
+        },
+      ],
+    });
+    config.solver.cliSandbox = {
+      workspaceRoot,
+    };
+
+    const handle = await startSolver(config, {
+      wsFactory: () => fakeWs,
+      spawnImpl: vi.fn((_command, _args, spawnOptions) => {
+        spawnedCwd = String(spawnOptions.cwd ?? "");
+        return makeMockProcess([
+          '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"ok"}}',
+          '{"type":"turn.completed","usage":{"input_tokens":14,"output_tokens":2}}',
+        ]);
+      }),
+      now: () => new Date("2026-02-23T12:00:00.000Z"),
+    });
+
+    try {
+      fakeWs.emitMessage({
+        type: "task_assignment",
+        task_id: "task_cli_workspace_runtime",
+        task_type: "llm_inference",
+        capability: {
+          fulfillment_path: "cli_codex",
+          provider_name: "openai-codex",
+          model_name: "gpt-5.3-codex",
+        },
+        payload: {
+          messages: [{ role: "user", content: "Say hello" }],
+        },
+      });
+
+      await waitFor(() =>
+        getMessagesByType(fakeWs.sent, "task_complete").some(
+          (entry) => entry.task_id === "task_cli_workspace_runtime",
+        ),
+      );
+
+      expect(spawnedCwd).toContain(
+        join(workspaceRoot, "codex", "task_cli_workspace_runtime-"),
+      );
+      await expect(stat(spawnedCwd)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await handle.stop();
+      await rm(workspaceRoot, { recursive: true, force: true });
     }
   });
 

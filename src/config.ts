@@ -22,6 +22,7 @@ import { isRecord } from "./guards.js";
 import type {
   ClawrmaConfig,
   BillingType,
+  CliSandboxConfig,
   FrameworkType,
   TaskType,
 } from "./types.js";
@@ -95,6 +96,14 @@ const CLAWRMA_CONFIG_SCHEMA: Record<string, unknown> = {
           items: { type: "string", enum: BILLING_TYPES },
         },
         domainPolicy: { type: "string", enum: DOMAIN_POLICIES },
+        cliSandbox: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            workspaceRoot: { type: "string" },
+            retainFailedWorkspaces: { type: "boolean" },
+          },
+        },
       },
     },
     inference: {
@@ -233,6 +242,13 @@ function isClawrmaConfig(value: unknown): value is ClawrmaConfig {
     return false;
   }
 
+  if (
+    value.solver.cliSandbox !== undefined &&
+    !isCliSandboxConfig(value.solver.cliSandbox)
+  ) {
+    return false;
+  }
+
   if (value.inference !== undefined) {
     if (!isRecord(value.inference)) {
       return false;
@@ -307,6 +323,18 @@ function isSolverSchedule(value: unknown): boolean {
 function isTaskTypeArray(value: unknown): value is TaskType[] {
   return (
     Array.isArray(value) && value.every((entry) => isOneOf(entry, TASK_TYPES))
+  );
+}
+
+function isCliSandboxConfig(value: unknown): value is CliSandboxConfig {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    (value.workspaceRoot === undefined || isString(value.workspaceRoot)) &&
+    (value.retainFailedWorkspaces === undefined ||
+      isBoolean(value.retainFailedWorkspaces))
   );
 }
 

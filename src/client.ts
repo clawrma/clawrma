@@ -34,11 +34,74 @@ export type SubmitTaskResultMap = TaskResultMap;
 export type TaskResult<T extends TaskType = TaskType> = TaskResultMap[T];
 
 /**
+ * Supported text content part for OpenAI-compatible inference messages.
+ */
+export interface InferenceChatTextContentPart {
+  type?: string;
+  text?: string;
+  input_text?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Supported message content preserved by the public inference client.
+ */
+export type InferenceChatMessageContent =
+  | string
+  | Array<string | InferenceChatTextContentPart>;
+
+/**
+ * Function tool definition accepted by the inference endpoint.
+ */
+export interface InferenceFunctionToolDefinition {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+  strict?: boolean;
+  [key: string]: unknown;
+}
+
+/**
+ * Tool definition accepted by the inference endpoint.
+ */
+export interface InferenceToolDefinition {
+  type: string;
+  function?: InferenceFunctionToolDefinition;
+  [key: string]: unknown;
+}
+
+/**
+ * Function-specific tool-choice selector.
+ */
+export interface InferenceToolChoiceFunction {
+  name: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Structured tool-choice selector accepted by the inference endpoint.
+ */
+export interface InferenceToolChoiceObject {
+  type: string;
+  function?: InferenceToolChoiceFunction;
+  [key: string]: unknown;
+}
+
+/**
+ * Tool-choice value accepted by the inference endpoint.
+ */
+export type InferenceToolChoice =
+  | "none"
+  | "auto"
+  | "required"
+  | InferenceToolChoiceObject;
+
+/**
  * Chat message payload for the OpenAI-compatible inference endpoint.
  */
 export interface InferenceChatMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: InferenceChatMessageContent;
 }
 
 /**
@@ -48,6 +111,9 @@ export interface InferenceChatRequest {
   model: string;
   stream: boolean;
   messages: InferenceChatMessage[];
+  tools?: InferenceToolDefinition[];
+  tool_choice?: InferenceToolChoice;
+  parallel_tool_calls?: boolean;
 }
 
 /**

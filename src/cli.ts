@@ -18,6 +18,7 @@ import {
 import { CONFIG_PATH } from "./constants.js";
 import { readConfig, writeConfig } from "./config.js";
 import { scanPrompt } from "./safety/scan.js";
+import { projectInferenceMessageContentText } from "./solver/contracts.js";
 import type {
   ClawrmaConfig,
   ApiError,
@@ -433,7 +434,10 @@ function registerCommands(program: Command, io: CliIo): void {
 
         if (isPromptSafetyScanEnabled(cfg) && options.safetyScan !== false) {
           const fullText = request.messages
-            .map((message) => message.content)
+            .map((message) =>
+              projectInferenceMessageContentText(message.content),
+            )
+            .filter((content) => content.length > 0)
             .join("\n\n");
           const flags = scanPrompt(fullText);
           if (flags.length > 0) {
@@ -773,16 +777,9 @@ function formatRecentActivity(recentActivity: {
 function buildInferenceRequest(
   prompt: string,
   options: InferCommandOptions,
-): {
-  model: string;
-  stream: boolean;
-  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
-} {
+): Parameters<typeof requestChatCompletions>[2] {
   const model = parseModelName(options.model ?? "clawrma/strong");
-  const messages: Array<{
-    role: "system" | "user" | "assistant";
-    content: string;
-  }> = [];
+  const messages: Parameters<typeof requestChatCompletions>[2]["messages"] = [];
 
   if (typeof options.system === "string" && options.system.length > 0) {
     messages.push({ role: "system", content: options.system });
@@ -856,6 +853,8 @@ async function writeStreamingInferenceResponse(
   }
 
   let sawDone = false;
+  let sawOutput = false;
+  let atLineStart = true;
   for await (const line of iterateResponseLines(response.body)) {
     if (!line.startsWith("data: ")) {
       continue;
@@ -871,15 +870,32 @@ async function writeStreamingInferenceResponse(
       break;
     }
 
-    const content = extractInferenceChunkContent(
-      JSON.parse(dataPart) as unknown,
-    );
-    if (content.length > 0) {
-      stdout.write(content);
+    const events = extractInferenceChunkEvents(JSON.parse(dataPart) as unknown);
+    for (const event of events) {
+      if (event.type === "text") {
+        if (event.text.length === 0) {
+          continue;
+        }
+
+        stdout.write(event.text);
+        sawOutput = true;
+        atLineStart = event.text.endsWith("\n");
+        continue;
+      }
+
+      if (!atLineStart && sawOutput) {
+        stdout.write("\n");
+      }
+      stdout.write(
+        formatTaggedInferenceLine("tool_call_delta", event.toolCall),
+      );
+      stdout.write("\n");
+      sawOutput = true;
+      atLineStart = true;
     }
   }
 
-  if (sawDone) {
+  if (sawDone && sawOutput && !atLineStart) {
     stdout.write("\n");
   }
 }
@@ -889,8 +905,8 @@ async function writeNonStreamingInferenceResponse(
   stdout: NodeJS.WritableStream,
 ): Promise<void> {
   const payload = (await response.json()) as unknown;
-  const content = extractInferenceMessageContent(payload);
-  stdout.write(`${content}\n`);
+  const content = extractInferenceMessageOutput(payload);
+  stdout.write(content.length > 0 ? `${content}\n` : "\n");
 }
 
 async function* iterateResponseLines(
@@ -931,10 +947,22 @@ async function* iterateResponseLines(
   }
 }
 
-function extractInferenceChunkContent(value: unknown): string {
+type CliInferenceRenderEvent =
+  | {
+      type: "text";
+      text: string;
+    }
+  | {
+      type: "tool_call_delta";
+      toolCall: unknown;
+    };
+
+function extractInferenceChunkEvents(
+  value: unknown,
+): CliInferenceRenderEvent[] {
   const payload = asRecord(value);
   if (!payload) {
-    return "";
+    return [];
   }
 
   if (payload.object === "error") {
@@ -948,15 +976,42 @@ function extractInferenceChunkContent(value: unknown): string {
 
   const choices = payload.choices;
   if (!Array.isArray(choices) || choices.length === 0) {
-    return "";
+    return [];
   }
 
   const first = asRecord(choices[0]);
   const delta = asRecord(first?.delta);
-  return typeof delta?.content === "string" ? delta.content : "";
+  if (!delta) {
+    return [];
+  }
+
+  const events: CliInferenceRenderEvent[] = [];
+  if (typeof delta.content === "string") {
+    events.push({
+      type: "text",
+      text: delta.content,
+    });
+  }
+
+  if (Object.hasOwn(delta, "tool_calls")) {
+    if (!Array.isArray(delta.tool_calls)) {
+      throw new Error("Inference stream emitted malformed tool_calls delta.");
+    }
+
+    for (const toolCall of delta.tool_calls) {
+      events.push({
+        type: "tool_call_delta",
+        toolCall,
+      });
+    }
+  }
+
+  return events;
 }
 
-function extractInferenceMessageContent(value: unknown): string {
+// Keep plain-text CLI behavior unchanged, but render structured tool calls as
+// tagged JSON lines so they remain visible instead of being flattened away.
+function extractInferenceMessageOutput(value: unknown): string {
   const payload = asRecord(value);
   if (!payload) {
     throw new Error("Inference response payload was not an object.");
@@ -969,12 +1024,52 @@ function extractInferenceMessageContent(value: unknown): string {
 
   const first = asRecord(choices[0]);
   const message = asRecord(first?.message);
-  const content = message?.content;
-  if (typeof content !== "string") {
+  if (!message) {
+    throw new Error("Inference response did not include an assistant message.");
+  }
+
+  const renderedLines: string[] = [];
+  const content = message.content;
+  let sawSupportedContent = false;
+
+  if (typeof content === "string") {
+    sawSupportedContent = true;
+    if (content.length > 0) {
+      renderedLines.push(content);
+    }
+  } else if (content !== undefined && content !== null) {
     throw new Error("Inference response did not include assistant content.");
   }
 
-  return content;
+  let sawToolCalls = false;
+  if (Object.hasOwn(message, "tool_calls")) {
+    if (!Array.isArray(message.tool_calls)) {
+      throw new Error(
+        "Inference response emitted malformed assistant tool_calls.",
+      );
+    }
+
+    for (const toolCall of message.tool_calls) {
+      renderedLines.push(formatTaggedInferenceLine("tool_call", toolCall));
+      sawToolCalls = true;
+    }
+  }
+
+  if (!sawSupportedContent && !sawToolCalls) {
+    throw new Error(
+      "Inference response did not include assistant content or tool_calls.",
+    );
+  }
+
+  return renderedLines.join("\n");
+}
+
+function formatTaggedInferenceLine(
+  tag: "tool_call_delta" | "tool_call",
+  value: unknown,
+): string {
+  const serialized = JSON.stringify(value);
+  return `[${tag}] ${serialized ?? "null"}`;
 }
 
 function parseHttpUrl(value: string): string {

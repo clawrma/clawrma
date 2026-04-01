@@ -170,6 +170,15 @@ describe("injectProvider", () => {
         },
       },
     });
+    const providerConfig =
+      (
+        rawPatch.models as {
+          providers?: { clawrma?: Record<string, unknown> };
+        }
+      ).providers?.clawrma ?? {};
+    expect(providerConfig.headers).toBeUndefined();
+    expect(providerConfig.defaultHeaders).toBeUndefined();
+    expect(providerConfig.trustMode).toBeUndefined();
   });
 });
 

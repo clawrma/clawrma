@@ -341,6 +341,57 @@ describe("client API behavior", () => {
     expect(headers["content-type"]).toBe("application/json");
     expect(headers["X-Safety-Scan"]).toBeUndefined();
     expect(headers["x-safety-scan"]).toBeUndefined();
+    expect(headers["X-Clawrma-Trust-Mode"]).toBeUndefined();
+  });
+
+  it("sends an explicit visible-warning trust-mode header for direct inference when requested", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await requestChatCompletions(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      {
+        model: "clawrma/strong",
+        stream: false,
+        messages: [{ role: "user", content: "hello world" }],
+      },
+      { trustMode: "visible-warning" },
+    );
+
+    const init = fetchMock.mock.calls[0]?.[1];
+    expect(init).toBeDefined();
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers["X-Clawrma-Trust-Mode"]).toBe("visible-warning");
+  });
+
+  it("sends an explicit clean-output trust-mode header for direct inference when requested", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await requestChatCompletions(
+      "https://api.clawrma.com",
+      "cr_sk_test",
+      {
+        model: "clawrma/strong",
+        stream: true,
+        messages: [{ role: "user", content: "hello world" }],
+      },
+      { trustMode: "clean-output" },
+    );
+
+    const init = fetchMock.mock.calls[0]?.[1];
+    expect(init).toBeDefined();
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers["X-Clawrma-Trust-Mode"]).toBe("clean-output");
   });
 
   it("preserves structured inference messages and tool config in chat-completions requests", async () => {

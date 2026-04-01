@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 - 2026-04-01
+
+- **Direct inference trust mode**: direct inference setup now supports trust-mode provider configuration for the Clawrma inference endpoint
+
 ## 0.2.0 - 2026-03-30
 
 - **Tool-capable CLI inference**: CLI-backed inference now preserves full conversation history and structured tool-call output

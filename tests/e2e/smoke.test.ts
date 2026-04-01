@@ -93,7 +93,8 @@ describeLive("e2e smoke", () => {
       headers: {
         Origin: "https://example.com",
         "Access-Control-Request-Method": "POST",
-        "Access-Control-Request-Headers": "Authorization, Content-Type",
+        "Access-Control-Request-Headers":
+          "Authorization, Content-Type, X-Clawrma-Trust-Mode",
       },
     });
 
@@ -105,6 +106,9 @@ describeLive("e2e smoke", () => {
     expect(
       response.headers.get("access-control-allow-headers") ?? "",
     ).toContain("Authorization");
+    expect(
+      response.headers.get("access-control-allow-headers") ?? "",
+    ).toContain("X-Clawrma-Trust-Mode");
   });
 
   it("GET /health returns HTTP 200", async () => {

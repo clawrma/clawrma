@@ -117,6 +117,18 @@ export interface InferenceChatRequest {
 }
 
 /**
+ * Explicit trust-mode selector for direct inference responses.
+ */
+export type InferenceTrustMode = "visible-warning" | "clean-output";
+
+/**
+ * Optional transport controls for direct inference requests.
+ */
+export interface InferenceRequestOptions {
+  trustMode?: InferenceTrustMode;
+}
+
+/**
  * Request body for account settings updates.
  */
 export interface AccountSettingsUpdate {
@@ -124,6 +136,7 @@ export interface AccountSettingsUpdate {
 }
 
 const AUTHORIZATION_HEADER = "Authorization";
+const INFERENCE_TRUST_MODE_HEADER = "X-Clawrma-Trust-Mode";
 
 /** Register a new account and receive an API key. */
 export async function registerAccount(
@@ -279,10 +292,11 @@ export async function requestChatCompletions(
   apiBaseUrl: string = DEFAULT_API_BASE_URL,
   apiKey: string,
   payload: InferenceChatRequest,
+  options?: InferenceRequestOptions,
 ): Promise<Response> {
   return requestResponse(buildInferenceEndpoint(apiBaseUrl), {
     method: "POST",
-    headers: withApiKey(apiKey),
+    headers: withInferenceHeaders(apiKey, options),
     body: JSON.stringify(payload),
   });
 }
@@ -314,6 +328,21 @@ function withApiKey(apiKey: string): HeadersInit {
   return {
     [AUTHORIZATION_HEADER]: `Bearer ${apiKey}`,
   };
+}
+
+function withInferenceHeaders(
+  apiKey: string,
+  options?: InferenceRequestOptions,
+): HeadersInit {
+  const headers: Record<string, string> = {
+    [AUTHORIZATION_HEADER]: `Bearer ${apiKey}`,
+  };
+
+  if (options?.trustMode) {
+    headers[INFERENCE_TRUST_MODE_HEADER] = options.trustMode;
+  }
+
+  return headers;
 }
 
 const DEFAULT_FETCH_TIMEOUT_MS = 60_000;

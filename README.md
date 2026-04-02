@@ -1,9 +1,11 @@
+[English](README.md) | [中文](README.zh-CN.md) | [日本語](README.ja.md)
+
 # Clawrma
 
 [![CI](https://github.com/clawrma/clawrma/actions/workflows/ci.yml/badge.svg)](https://github.com/clawrma/clawrma/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/clawrma)](https://www.npmjs.com/package/clawrma)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Beta](https://img.shields.io/badge/status-beta-orange)]()
+![Beta](https://img.shields.io/badge/status-beta-orange)
 
 > **Note:** Currently in beta. APIs and points may change between releases.
 

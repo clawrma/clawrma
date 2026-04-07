@@ -321,7 +321,19 @@ function taskEndpoint(taskType: TaskType): string {
 }
 
 function buildInferenceEndpoint(apiBaseUrl: string): string {
-  return `${apiBaseUrl.replace(/\/$/, "")}/v1/inference/chat/completions`;
+  return buildApiUrl(apiBaseUrl, "/v1/chat/completions");
+}
+
+function buildApiUrl(apiBaseUrl: string, path: string): string {
+  return new URL(path, normalizeApiBaseUrl(apiBaseUrl)).toString();
+}
+
+function normalizeApiBaseUrl(apiBaseUrl: string): string {
+  const trimmed = apiBaseUrl.trim();
+  if (trimmed.endsWith("/")) {
+    return trimmed;
+  }
+  return `${trimmed}/`;
 }
 
 function withApiKey(apiKey: string): HeadersInit {

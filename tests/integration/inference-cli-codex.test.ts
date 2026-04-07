@@ -28,7 +28,7 @@ describeLive("integration inference cli_codex", () => {
       async (solver) => {
         const { apiKey } = await createLiveAccount();
         const response = await fetch(
-          `${LIVE_API_BASE_URL}/v1/inference/chat/completions`,
+          `${LIVE_API_BASE_URL}/v1/chat/completions`,
           {
             method: "POST",
             headers: {

@@ -92,7 +92,7 @@ describeLive("integration multi-solver routes", () => {
       "multi_solver_llm_inference",
       async () => {
         const response = await fetch(
-          `${LIVE_API_BASE_URL}/v1/inference/chat/completions`,
+          `${LIVE_API_BASE_URL}/v1/chat/completions`,
           {
             method: "POST",
             headers: {

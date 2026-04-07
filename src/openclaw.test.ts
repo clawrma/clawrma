@@ -158,7 +158,7 @@ describe("injectProvider", () => {
       models: {
         providers: {
           clawrma: {
-            baseUrl: "https://clawrma.test/v1/inference",
+            baseUrl: "https://clawrma.test/v1",
             models: [
               {
                 id: "strong",

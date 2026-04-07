@@ -323,7 +323,7 @@ describe("client API behavior", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "https://api.clawrma.com/v1/inference/chat/completions",
+      "https://api.clawrma.com/v1/chat/completions",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
@@ -442,7 +442,7 @@ describe("client API behavior", () => {
     );
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "https://api.clawrma.com/v1/inference/chat/completions",
+      "https://api.clawrma.com/v1/chat/completions",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify(payload),
@@ -488,10 +488,32 @@ describe("client API behavior", () => {
     );
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "https://api.clawrma.com/v1/inference/chat/completions",
+      "https://api.clawrma.com/v1/chat/completions",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify(payload),
+      }),
+    );
+  });
+
+  it("accepts an api base URL that already includes /v1 without duplicating the segment", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await requestChatCompletions("https://api.clawrma.com/v1", "cr_sk_test", {
+      model: "clawrma/strong",
+      stream: false,
+      messages: [{ role: "user", content: "hello world" }],
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.clawrma.com/v1/chat/completions",
+      expect.objectContaining({
+        method: "POST",
       }),
     );
   });

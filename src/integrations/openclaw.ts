@@ -531,7 +531,7 @@ function buildClawrmaProvider(
   apiBaseUrl: string,
 ): Record<string, unknown> {
   return {
-    baseUrl: `${apiBaseUrl}/v1/inference`,
+    baseUrl: buildProviderBaseUrl(apiBaseUrl),
     apiKey,
     api: "openai-completions",
     models: [
@@ -544,6 +544,18 @@ function buildClawrmaProvider(
       },
     ],
   };
+}
+
+function buildProviderBaseUrl(apiBaseUrl: string): string {
+  return new URL("/v1", normalizeApiBaseUrl(apiBaseUrl)).toString();
+}
+
+function normalizeApiBaseUrl(apiBaseUrl: string): string {
+  const trimmed = apiBaseUrl.trim();
+  if (trimmed.endsWith("/")) {
+    return trimmed;
+  }
+  return `${trimmed}/`;
 }
 
 function readProvidersFromConfig(

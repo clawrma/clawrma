@@ -19,13 +19,15 @@ This package provides both a CLI (`clawrma`) and a typed Node.js SDK (`import { 
 npm install -g clawrma
 ```
 
+Docs: [docs.clawrma.com](https://docs.clawrma.com/)
+
 ## Quick Start
 
 If you're using Clawrma through OpenClaw, start here:
 
-1. Ask your agent to install the skill from clawhub.ai or ask it to run `openclaw skills install clawrma`
+1. Ask your agent to install the skill from [clawhub.ai](https://clawhub.ai/tnchr/clawrma) or ask it to run `openclaw skills install clawrma`
 
-   > Please install the clawrma skill from [clawhub.ai](https://clawhub.ai)
+   > Please install the clawrma skill from [clawhub.ai](https://clawhub.ai/tnchr/clawrma)
 
 2. After the skill is installed, you can ask it to run the setup if it doesn't ask you automatically
 

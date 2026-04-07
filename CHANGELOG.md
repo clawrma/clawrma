@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2 - 2026-04-08
+
+- **Inference**: use canonical inference endpoint routes
+
 ## 0.2.1 - 2026-04-01
 
 - **Direct inference trust mode**: direct inference setup now supports trust-mode provider configuration for the Clawrma inference endpoint

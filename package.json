@@ -1,6 +1,6 @@
 {
   "name": "clawrma",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "CLI and SDK for the Clawrma solver network - delegate web tasks to distributed solvers.",
   "license": "MIT",
   "repository": {

@@ -8,6 +8,7 @@ import {
 
 const describeLive = CAN_RUN_LIVE_INTEGRATION ? describe : describe.skip;
 const USE_FIRECRAWL_SOLVER = process.env.CLAWRMA_USE_FIRECRAWL_SOLVER === "1";
+const LIVE_SNAPSHOT_TEST_TIMEOUT_MS = 20_000;
 const QUALITY_GATE_PASS_URL = "https://www.iana.org/domains/example";
 const EXAMPLE_SNAPSHOT_TEXT =
   "Example Domain is used for illustrative examples in documentation and testing. " +
@@ -42,66 +43,70 @@ function assertTaggedSnapshot(result: Record<string, unknown>): void {
 }
 
 describeLive("integration snapshot", () => {
-  it("submits page_snapshot and receives a tagged snapshot payload", async () => {
-    if (USE_FIRECRAWL_SOLVER) {
-      const { apiKey } = await createLiveAccount();
-      const result = await submitLiveTask(apiKey, "page_snapshot", {
-        url: QUALITY_GATE_PASS_URL,
-      });
-
-      assertTaggedSnapshot(result as Record<string, unknown>);
-      expect(result.snapshot_format).toBe("markdown");
-      expect(typeof result.title).toBe("string");
-      const snapshot =
-        typeof result.snapshot === "string" ? result.snapshot : "";
-      expect(snapshot.length).toBeGreaterThan(0);
-      return;
-    }
-
-    await withLiveSolver(
-      {
-        capabilities: [{ taskType: "page_snapshot" }],
-        onTaskAssignment: ({ payload }) => {
-          const targetUrl =
-            typeof payload.url === "string"
-              ? payload.url
-              : "https://example.com";
-          return {
-            result: {
-              snapshot: {
-                headings: ["Example Domain"],
-                text: EXAMPLE_SNAPSHOT_TEXT,
-                links: [{ href: "https://www.iana.org/domains/example" }],
-              },
-              snapshot_format: "aria",
-              text: EXAMPLE_SNAPSHOT_TEXT,
-              title: "Example Domain",
-              url: targetUrl,
-            },
-          };
-        },
-      },
-      async () => {
+  it(
+    "submits page_snapshot and receives a tagged snapshot payload",
+    async () => {
+      if (USE_FIRECRAWL_SOLVER) {
         const { apiKey } = await createLiveAccount();
         const result = await submitLiveTask(apiKey, "page_snapshot", {
-          url: "https://example.com",
+          url: QUALITY_GATE_PASS_URL,
         });
 
         assertTaggedSnapshot(result as Record<string, unknown>);
-        expect(result.snapshot_format).toBe("aria");
+        expect(result.snapshot_format).toBe("markdown");
         expect(typeof result.title).toBe("string");
-        expect(result.title).toContain("Example Domain");
-        expect(result.snapshot).toBeDefined();
+        const snapshot =
+          typeof result.snapshot === "string" ? result.snapshot : "";
+        expect(snapshot.length).toBeGreaterThan(0);
+        return;
+      }
 
-        if (result.snapshot && typeof result.snapshot === "object") {
-          const maybeSnapshot = result.snapshot as {
-            text?: unknown;
-            headings?: unknown;
-          };
-          expect(typeof maybeSnapshot.text).toBe("string");
-          expect(Array.isArray(maybeSnapshot.headings)).toBe(true);
-        }
-      },
-    );
-  });
+      await withLiveSolver(
+        {
+          capabilities: [{ taskType: "page_snapshot" }],
+          onTaskAssignment: ({ payload }) => {
+            const targetUrl =
+              typeof payload.url === "string"
+                ? payload.url
+                : "https://example.com";
+            return {
+              result: {
+                snapshot: {
+                  headings: ["Example Domain"],
+                  text: EXAMPLE_SNAPSHOT_TEXT,
+                  links: [{ href: "https://www.iana.org/domains/example" }],
+                },
+                snapshot_format: "aria",
+                text: EXAMPLE_SNAPSHOT_TEXT,
+                title: "Example Domain",
+                url: targetUrl,
+              },
+            };
+          },
+        },
+        async () => {
+          const { apiKey } = await createLiveAccount();
+          const result = await submitLiveTask(apiKey, "page_snapshot", {
+            url: "https://example.com",
+          });
+
+          assertTaggedSnapshot(result as Record<string, unknown>);
+          expect(result.snapshot_format).toBe("aria");
+          expect(typeof result.title).toBe("string");
+          expect(result.title).toContain("Example Domain");
+          expect(result.snapshot).toBeDefined();
+
+          if (result.snapshot && typeof result.snapshot === "object") {
+            const maybeSnapshot = result.snapshot as {
+              text?: unknown;
+              headings?: unknown;
+            };
+            expect(typeof maybeSnapshot.text).toBe("string");
+            expect(Array.isArray(maybeSnapshot.headings)).toBe(true);
+          }
+        },
+      );
+    },
+    LIVE_SNAPSHOT_TEST_TIMEOUT_MS,
+  );
 });

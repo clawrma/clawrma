@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3 - 2026-05-28
+
+- **OpenClaw config compatibility**: read JSON5 config through OpenClaw's resolver order and use Gateway or CLI patch paths before strict JSON file fallback
+- **OpenClaw idle detection**: use Gateway `status` instead of HTTP health liveness payloads, with explicit unknown-status fallback handling
+- **Dependencies**: refresh lockfile resolutions for clean npm audit results
+
 ## 0.2.2 - 2026-04-08
 
 - **Inference**: use canonical inference endpoint routes

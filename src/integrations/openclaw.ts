@@ -1,4 +1,6 @@
-import { access, readFile, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { access, lstat, readFile, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isRecord } from "../guards.js";
@@ -9,14 +11,39 @@ import {
 } from "../search/builtins.js";
 import type { ScheduleWindow } from "../types.js";
 
-const OPENCLAW_CONFIG_PATH = join(homedir(), ".openclaw", "openclaw.json");
-const LEGACY_CONFIG_PATH = join(homedir(), ".clawdbot", "clawdbot.json");
+const requireJson5 = createRequire(import.meta.url);
+const JSON5 = requireJson5("json5") as typeof import("json5");
 const CLAWRMA_FALLBACK_ID = "clawrma/strong";
 const CLAWRMA_PROVIDER_ID = "clawrma";
 const CLAWRMA_SKILL_ID = "clawrma";
 const DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
 const END_OF_DAY_MINUTES = 24 * 60;
 const END_OF_DAY_RENDER = "23:59";
+const OPENCLAW_CLI_PATCH_TIMEOUT_MS = 5_000;
+
+/** Environment variables that can affect OpenClaw config resolution. */
+export interface OpenClawConfigResolverEnv {
+  [key: string]: string | undefined;
+  OPENCLAW_CONFIG_PATH?: string | undefined;
+  OPENCLAW_STATE_DIR?: string | undefined;
+  OPENCLAW_HOME?: string | undefined;
+}
+
+/** Source label for an OpenClaw config candidate. */
+export type OpenClawConfigCandidateSource =
+  | "OPENCLAW_CONFIG_PATH"
+  | "OPENCLAW_STATE_DIR"
+  | "OPENCLAW_HOME"
+  | "default";
+
+/** Candidate file path from OpenClaw config resolution order. */
+export interface OpenClawConfigCandidate {
+  path: string;
+  source: OpenClawConfigCandidateSource;
+  sourceValue: string;
+  relativePath: string | null;
+}
+
 export interface ProviderInjectionResult {
   injected: boolean;
   fallbackPosition: number;
@@ -60,23 +87,89 @@ interface RpcRequestPayload {
   params: Record<string, unknown>;
 }
 
+type OpenClawConfigWritePath =
+  | "gateway-rpc"
+  | "openclaw-cli"
+  | "strict-json-file";
+
+interface OpenClawConfigPatchPlan<TResult> {
+  patch: Record<string, unknown>;
+  result: TResult;
+}
+
+interface OpenClawConfigWriteFailure {
+  path: OpenClawConfigWritePath;
+  error: unknown;
+}
+
+interface OpenClawConfigWriteOptions<TResult> {
+  gatewayUrl: string;
+  gatewayToken: string;
+  operation: string;
+  preloaded?: LoadedOpenClawConfig;
+  buildPatch: (
+    currentConfig: Record<string, unknown>,
+  ) => OpenClawConfigPatchPlan<TResult>;
+  resultFromGateway?: (
+    plan: OpenClawConfigPatchPlan<TResult>,
+    rpcPayload: unknown,
+  ) => TResult;
+  logSuccess: (path: OpenClawConfigWritePath, result: TResult) => void;
+}
+
+/** Resolve OpenClaw config candidates without reading or writing the filesystem. */
+export function resolveOpenClawConfigCandidates(
+  env: OpenClawConfigResolverEnv = process.env,
+  homeDir = homedir(),
+): OpenClawConfigCandidate[] {
+  const explicitConfigPath = readEnvPath(env.OPENCLAW_CONFIG_PATH);
+  if (explicitConfigPath) {
+    return [
+      {
+        path: explicitConfigPath,
+        source: "OPENCLAW_CONFIG_PATH",
+        sourceValue: explicitConfigPath,
+        relativePath: null,
+      },
+    ];
+  }
+
+  const stateDir = readEnvPath(env.OPENCLAW_STATE_DIR);
+  if (stateDir) {
+    return [
+      buildConfigCandidate(stateDir, "openclaw.json", "OPENCLAW_STATE_DIR"),
+      buildConfigCandidate(stateDir, "clawdbot.json", "OPENCLAW_STATE_DIR"),
+    ];
+  }
+
+  const openClawHome = readEnvPath(env.OPENCLAW_HOME);
+  const configHome = openClawHome ?? homeDir;
+  const source: OpenClawConfigCandidateSource = openClawHome
+    ? "OPENCLAW_HOME"
+    : "default";
+  const candidates: OpenClawConfigCandidate[] = [];
+  candidates.push(
+    buildConfigCandidate(configHome, ".openclaw/openclaw.json", source),
+    buildConfigCandidate(configHome, ".openclaw/clawdbot.json", source),
+    buildConfigCandidate(configHome, ".clawdbot/openclaw.json", source),
+    buildConfigCandidate(configHome, ".clawdbot/clawdbot.json", source),
+  );
+
+  return candidates;
+}
+
 export async function readOpenClawConfig(): Promise<OpenClawConfig | null> {
-  const path = await firstExistingPath([
-    OPENCLAW_CONFIG_PATH,
-    LEGACY_CONFIG_PATH,
-  ]);
-  if (!path) {
+  const candidate = await firstExistingConfigCandidate(
+    resolveOpenClawConfigCandidates(),
+  );
+  if (!candidate) {
     return null;
   }
 
-  const raw = await readFile(path, "utf8");
-  const parsed = JSON.parse(raw) as unknown;
-  if (!isRecord(parsed)) {
-    throw new Error(`OpenClaw config at ${path} is not a JSON object.`);
-  }
+  const parsed = await readOpenClawConfigObject(candidate.path);
 
   return {
-    path,
+    path: candidate.path,
     raw: parsed,
     providers: readProvidersFromConfig(parsed),
     activeHours: extractActiveHours(parsed),
@@ -93,92 +186,35 @@ export async function injectProvider(
   apiBaseUrl: string,
   preloaded?: LoadedOpenClawConfig,
 ): Promise<ProviderInjectionResult> {
-  try {
-    const current = await gatewayRpc(
-      gatewayUrl,
-      gatewayToken,
-      "config.get",
-      {},
-    );
-    const currentConfig = extractRpcConfig(current);
-    const existingFallbacks = getFallbacks(currentConfig);
-    const alreadyPresent = existingFallbacks.includes(CLAWRMA_FALLBACK_ID);
-    const nextFallbacks = alreadyPresent
-      ? existingFallbacks
-      : [...existingFallbacks, CLAWRMA_FALLBACK_ID];
-
-    const patch: Record<string, unknown> = {
-      models: {
-        providers: {
-          [CLAWRMA_PROVIDER_ID]: buildClawrmaProvider(apiKey, apiBaseUrl),
+  return writeOpenClawConfigPatch({
+    gatewayUrl,
+    gatewayToken,
+    operation: "inject Clawrma provider into OpenClaw config",
+    preloaded,
+    buildPatch: (currentConfig) =>
+      buildProviderInjectionPatch(currentConfig, apiKey, apiBaseUrl),
+    resultFromGateway: (plan, rpcPayload) => {
+      const resultingFallbacks = getFallbacks(extractRpcConfig(rpcPayload));
+      if (resultingFallbacks.length === 0) {
+        return plan.result;
+      }
+      return buildProviderInjectionResult(
+        plan.result.injected,
+        resultingFallbacks,
+      );
+    },
+    logSuccess: (path, result) => {
+      setupLogger.info(
+        {
+          path,
+          injected: result.injected,
+          fallbackPosition: result.fallbackPosition,
+          fallbackTotal: result.fallbackTotal,
         },
-      },
-      skills: {
-        entries: {
-          [CLAWRMA_SKILL_ID]: {
-            env: {
-              CLAWRMA_API_KEY: apiKey,
-            },
-          },
-        },
-      },
-    };
-
-    if (!alreadyPresent) {
-      patch.agents = {
-        defaults: {
-          model: {
-            fallbacks: nextFallbacks,
-          },
-        },
-      };
-    }
-
-    const patchParams: Record<string, unknown> = {
-      raw: JSON.stringify(patch),
-    };
-    const baseHash = extractRpcHash(current);
-    if (baseHash) {
-      patchParams.baseHash = baseHash;
-    }
-
-    const result = await gatewayRpc(
-      gatewayUrl,
-      gatewayToken,
-      "config.patch",
-      patchParams,
-    );
-    syncPreloadedConfigFromRpc(preloaded, result);
-    const resultingFallbacks = getFallbacks(extractRpcConfig(result));
-    const fallbackList =
-      resultingFallbacks.length > 0 ? resultingFallbacks : nextFallbacks;
-
-    setupLogger.info(
-      {
-        path: "config.patch",
-        injected: !alreadyPresent,
-        fallbackPosition: fallbackList.indexOf(CLAWRMA_FALLBACK_ID) + 1,
-        fallbackTotal: fallbackList.length,
-      },
-      "Injected Clawrma provider through OpenClaw Gateway RPC",
-    );
-
-    return {
-      injected: !alreadyPresent,
-      fallbackPosition: fallbackList.indexOf(CLAWRMA_FALLBACK_ID) + 1,
-      fallbackTotal: fallbackList.length,
-    };
-  } catch (error: unknown) {
-    setupLogger.warn(
-      {
-        error: error instanceof Error ? error.message : String(error),
-        path: "file-edit",
-      },
-      "OpenClaw Gateway RPC unavailable. Falling back to direct config file edit for provider injection.",
-    );
-    await refreshPreloadedConfig(preloaded);
-    return injectProviderDirect(apiKey, apiBaseUrl, preloaded);
-  }
+        "Injected Clawrma provider into OpenClaw config",
+      );
+    },
+  });
 }
 
 export async function writeClawrmaApiKey(
@@ -186,68 +222,18 @@ export async function writeClawrmaApiKey(
   gatewayToken: string,
   apiKey: string,
 ): Promise<void> {
-  try {
-    const current = await gatewayRpc(
-      gatewayUrl,
-      gatewayToken,
-      "config.get",
-      {},
-    );
-    const patch: Record<string, unknown> = {
-      skills: {
-        entries: {
-          [CLAWRMA_SKILL_ID]: {
-            env: {
-              CLAWRMA_API_KEY: apiKey,
-            },
-          },
-        },
-      },
-    };
-
-    const params: Record<string, unknown> = {
-      raw: JSON.stringify(patch),
-    };
-    const baseHash = extractRpcHash(current);
-    if (baseHash) {
-      params.baseHash = baseHash;
-    }
-
-    await gatewayRpc(gatewayUrl, gatewayToken, "config.patch", params);
-    setupLogger.info(
-      { path: "config.patch" },
-      "Wrote CLAWRMA_API_KEY to OpenClaw skill env",
-    );
-    return;
-  } catch (error: unknown) {
-    setupLogger.warn(
-      {
-        error: error instanceof Error ? error.message : String(error),
-        path: "file-edit",
-      },
-      "OpenClaw Gateway RPC unavailable. Falling back to direct config file edit for CLAWRMA_API_KEY.",
-    );
-  }
-
-  try {
-    const loaded = await loadOpenClawConfigForWrite();
-    const skills = ensureRecord(loaded.config, "skills");
-    const entries = ensureRecord(skills, "entries");
-    const clawrmaSkill = ensureRecord(entries, CLAWRMA_SKILL_ID);
-    const env = ensureRecord(clawrmaSkill, "env");
-    env.CLAWRMA_API_KEY = apiKey;
-
-    await writeFile(
-      loaded.path,
-      `${JSON.stringify(loaded.config, null, 2)}\n`,
-      "utf8",
-    );
-  } catch (error: unknown) {
-    throw new Error(
-      "Failed to write CLAWRMA_API_KEY via OpenClaw RPC and direct config file fallback.",
-      { cause: error },
-    );
-  }
+  await writeOpenClawConfigPatch({
+    gatewayUrl,
+    gatewayToken,
+    operation: "write CLAWRMA_API_KEY to OpenClaw config",
+    buildPatch: () => ({
+      patch: buildClawrmaApiKeyPatch(apiKey),
+      result: undefined,
+    }),
+    logSuccess: (path) => {
+      setupLogger.info({ path }, "Wrote CLAWRMA_API_KEY to OpenClaw skill env");
+    },
+  });
 }
 
 export async function injectFirecrawlConfig(
@@ -424,75 +410,232 @@ export function invertActiveHoursToSolverWindows(
   });
 }
 
-async function injectProviderDirect(
+function buildProviderInjectionPatch(
+  currentConfig: Record<string, unknown>,
   apiKey: string,
   apiBaseUrl: string,
-  preloaded?: LoadedOpenClawConfig,
-): Promise<ProviderInjectionResult> {
-  const loaded = preloaded ?? (await loadOpenClawConfigForWrite());
-
-  const models = ensureRecord(loaded.config, "models");
-  const providers = ensureRecord(models, "providers");
-  providers[CLAWRMA_PROVIDER_ID] = buildClawrmaProvider(apiKey, apiBaseUrl);
-
-  const existingFallbacks = getFallbacks(loaded.config);
+): OpenClawConfigPatchPlan<ProviderInjectionResult> {
+  const existingFallbacks = getFallbacks(currentConfig);
   const alreadyPresent = existingFallbacks.includes(CLAWRMA_FALLBACK_ID);
   const nextFallbacks = alreadyPresent
     ? existingFallbacks
     : [...existingFallbacks, CLAWRMA_FALLBACK_ID];
 
-  const agents = ensureRecord(loaded.config, "agents");
-  const defaults = ensureRecord(agents, "defaults");
-  const model = ensureRecord(defaults, "model");
-  model.fallbacks = nextFallbacks;
-
-  const skills = ensureRecord(loaded.config, "skills");
-  const entries = ensureRecord(skills, "entries");
-  const clawrmaSkill = ensureRecord(entries, CLAWRMA_SKILL_ID);
-  const env = ensureRecord(clawrmaSkill, "env");
-  env.CLAWRMA_API_KEY = apiKey;
-
-  await writeFile(
-    loaded.path,
-    `${JSON.stringify(loaded.config, null, 2)}\n`,
-    "utf8",
-  );
-
-  setupLogger.info(
-    {
-      path: loaded.path,
-      injected: !alreadyPresent,
-      fallbackPosition: nextFallbacks.indexOf(CLAWRMA_FALLBACK_ID) + 1,
-      fallbackTotal: nextFallbacks.length,
+  const patch: Record<string, unknown> = {
+    models: {
+      providers: {
+        [CLAWRMA_PROVIDER_ID]: buildClawrmaProvider(apiKey, apiBaseUrl),
+      },
     },
-    "Injected Clawrma provider through direct OpenClaw config file edit",
-  );
+    skills: {
+      entries: {
+        [CLAWRMA_SKILL_ID]: {
+          env: {
+            CLAWRMA_API_KEY: apiKey,
+          },
+        },
+      },
+    },
+  };
+
+  if (!alreadyPresent) {
+    patch.agents = {
+      defaults: {
+        model: {
+          fallbacks: nextFallbacks,
+        },
+      },
+    };
+  }
 
   return {
-    injected: !alreadyPresent,
-    fallbackPosition: nextFallbacks.indexOf(CLAWRMA_FALLBACK_ID) + 1,
-    fallbackTotal: nextFallbacks.length,
+    patch,
+    result: buildProviderInjectionResult(!alreadyPresent, nextFallbacks),
   };
 }
 
-export async function loadOpenClawConfigForWrite(): Promise<LoadedOpenClawConfig> {
-  const path = await firstExistingPath([
-    OPENCLAW_CONFIG_PATH,
-    LEGACY_CONFIG_PATH,
-  ]);
-  if (!path) {
-    throw new Error(
-      "OpenClaw config not found at ~/.openclaw/openclaw.json or ~/.clawdbot/clawdbot.json",
+function buildProviderInjectionResult(
+  injected: boolean,
+  fallbackList: string[],
+): ProviderInjectionResult {
+  return {
+    injected,
+    fallbackPosition: fallbackList.indexOf(CLAWRMA_FALLBACK_ID) + 1,
+    fallbackTotal: fallbackList.length,
+  };
+}
+
+function buildClawrmaApiKeyPatch(apiKey: string): Record<string, unknown> {
+  return {
+    skills: {
+      entries: {
+        [CLAWRMA_SKILL_ID]: {
+          env: {
+            CLAWRMA_API_KEY: apiKey,
+          },
+        },
+      },
+    },
+  };
+}
+
+async function writeOpenClawConfigPatch<TResult>(
+  options: OpenClawConfigWriteOptions<TResult>,
+): Promise<TResult> {
+  const failures: OpenClawConfigWriteFailure[] = [];
+
+  try {
+    const current = await gatewayRpc(
+      options.gatewayUrl,
+      options.gatewayToken,
+      "config.get",
+      {},
+    );
+    const plan = options.buildPatch(extractRpcConfig(current));
+    const params: Record<string, unknown> = {
+      raw: JSON.stringify(plan.patch),
+    };
+    const baseHash = extractRpcHash(current);
+    if (baseHash) {
+      params.baseHash = baseHash;
+    }
+
+    const rpcResult = await gatewayRpc(
+      options.gatewayUrl,
+      options.gatewayToken,
+      "config.patch",
+      params,
+    );
+    syncPreloadedConfigFromRpc(options.preloaded, rpcResult);
+    const result = options.resultFromGateway
+      ? options.resultFromGateway(plan, rpcResult)
+      : plan.result;
+    options.logSuccess("gateway-rpc", result);
+    return result;
+  } catch (error: unknown) {
+    failures.push({ path: "gateway-rpc", error });
+    setupLogger.warn(
+      {
+        path: "gateway-rpc",
+        error: formatErrorMessage(error),
+      },
+      "OpenClaw Gateway RPC config write unavailable. Trying OpenClaw CLI.",
     );
   }
 
-  const raw = await readFile(path, "utf8");
-  const parsed = JSON.parse(raw) as unknown;
-  if (!isRecord(parsed)) {
-    throw new Error(`OpenClaw config at ${path} is not a JSON object.`);
+  try {
+    const currentConfig = await loadOpenClawConfigForPatch(options.preloaded);
+    const plan = options.buildPatch(currentConfig);
+    await patchOpenClawConfigWithCli(plan.patch);
+    syncPreloadedConfigFromPatch(options.preloaded, plan.patch);
+    options.logSuccess("openclaw-cli", plan.result);
+    return plan.result;
+  } catch (error: unknown) {
+    failures.push({ path: "openclaw-cli", error });
+    setupLogger.warn(
+      {
+        path: "openclaw-cli",
+        error: formatErrorMessage(error),
+      },
+      "OpenClaw CLI config patch unavailable. Trying strict JSON file fallback.",
+    );
   }
 
-  return { config: parsed, path };
+  try {
+    const loaded = await loadStrictOpenClawConfigForDirectWrite();
+    const plan = options.buildPatch(loaded.config);
+    applyConfigPatch(loaded.config, plan.patch);
+    await writeFile(
+      loaded.path,
+      `${JSON.stringify(loaded.config, null, 2)}\n`,
+      "utf8",
+    );
+    syncPreloadedConfigFromPatch(options.preloaded, plan.patch);
+    options.logSuccess("strict-json-file", plan.result);
+    return plan.result;
+  } catch (error: unknown) {
+    failures.push({ path: "strict-json-file", error });
+    throw buildOpenClawConfigWriteError(options.operation, failures);
+  }
+}
+
+export async function loadOpenClawConfigForWrite(): Promise<LoadedOpenClawConfig> {
+  const candidates = resolveOpenClawConfigCandidates();
+  const candidate = await firstExistingConfigCandidate(candidates);
+  if (!candidate) {
+    throw new Error(
+      `OpenClaw config not found. Checked: ${formatConfigCandidateList(candidates)}.`,
+    );
+  }
+
+  const parsed = await readOpenClawConfigObject(candidate.path);
+
+  return { config: parsed, path: candidate.path };
+}
+
+async function loadOpenClawConfigForPatch(
+  preloaded?: LoadedOpenClawConfig,
+): Promise<Record<string, unknown>> {
+  if (preloaded) {
+    await refreshPreloadedConfig(preloaded);
+    return preloaded.config;
+  }
+
+  const candidate = await firstExistingConfigCandidate(
+    resolveOpenClawConfigCandidates(),
+  );
+  if (!candidate) {
+    return {};
+  }
+
+  return readOpenClawConfigObject(candidate.path);
+}
+
+async function loadStrictOpenClawConfigForDirectWrite(): Promise<LoadedOpenClawConfig> {
+  const candidates = resolveOpenClawConfigCandidates();
+  for (const candidate of candidates) {
+    let stats: Awaited<ReturnType<typeof lstat>>;
+    try {
+      stats = await lstat(candidate.path);
+    } catch (error: unknown) {
+      if (
+        isNodeErrorCode(error, "ENOENT") ||
+        isNodeErrorCode(error, "ENOTDIR")
+      ) {
+        continue;
+      }
+      throw new Error(
+        `Failed to inspect OpenClaw config at ${candidate.path}.`,
+        { cause: error },
+      );
+    }
+
+    if (stats.isSymbolicLink()) {
+      throw new Error(
+        `Refusing direct OpenClaw config file edit at ${candidate.path} because it is a symlink. Start the OpenClaw Gateway or ensure the openclaw CLI is on PATH.`,
+      );
+    }
+    if (stats.isDirectory()) {
+      throw new Error(
+        `Refusing direct OpenClaw config file edit at ${candidate.path} because it is a directory.`,
+      );
+    }
+    if (!stats.isFile()) {
+      throw new Error(
+        `Refusing direct OpenClaw config file edit at ${candidate.path} because it is not a regular file.`,
+      );
+    }
+
+    const raw = await readFile(candidate.path, "utf8");
+    return {
+      config: parseStrictOpenClawConfigForDirectWrite(raw, candidate.path),
+      path: candidate.path,
+    };
+  }
+
+  throw new Error(
+    `OpenClaw config not found. Checked: ${formatConfigCandidateList(candidates)}.`,
+  );
 }
 
 async function refreshPreloadedConfig(
@@ -503,11 +646,7 @@ async function refreshPreloadedConfig(
   }
 
   try {
-    const raw = await readFile(preloaded.path, "utf8");
-    const parsed = JSON.parse(raw) as unknown;
-    if (isRecord(parsed)) {
-      preloaded.config = parsed;
-    }
+    preloaded.config = await readOpenClawConfigObject(preloaded.path);
   } catch {
     // Keep existing preloaded config snapshot if refresh fails.
   }
@@ -712,6 +851,77 @@ async function gatewayRpc(
   return payload;
 }
 
+async function patchOpenClawConfigWithCli(
+  patch: Record<string, unknown>,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("openclaw", ["config", "patch", "--stdin"], {
+      env: process.env,
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stderr = "";
+    let settled = false;
+
+    const settle = (error?: Error): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    };
+
+    const timeout = setTimeout(() => {
+      child.kill();
+      settle(
+        new Error(
+          `OpenClaw CLI config patch timed out after ${OPENCLAW_CLI_PATCH_TIMEOUT_MS}ms.`,
+        ),
+      );
+    }, OPENCLAW_CLI_PATCH_TIMEOUT_MS);
+
+    child.stderr.on("data", (chunk: unknown) => {
+      stderr += chunkToString(chunk);
+    });
+
+    child.on("error", (error: unknown) => {
+      if (isNodeErrorCode(error, "ENOENT")) {
+        settle(
+          new Error("OpenClaw CLI unavailable: openclaw not found on PATH.", {
+            cause: error,
+          }),
+        );
+        return;
+      }
+      settle(new Error("Failed to start OpenClaw CLI.", { cause: error }));
+    });
+
+    child.on("close", (code, signal) => {
+      if (code === 0) {
+        settle();
+        return;
+      }
+      const exitDetails =
+        code === null ? `signal ${signal ?? "unknown"}` : `exit code ${code}`;
+      const stderrDetails = stderr.trim();
+      settle(
+        new Error(
+          stderrDetails
+            ? `OpenClaw CLI config patch failed with ${exitDetails}: ${stderrDetails}`
+            : `OpenClaw CLI config patch failed with ${exitDetails}.`,
+        ),
+      );
+    });
+
+    child.stdin.end(`${JSON.stringify(patch, null, 2)}\n`, "utf8");
+  });
+}
+
 function mergeIntervals(intervals: DayInterval[]): DayInterval[] {
   if (intervals.length === 0) {
     return [];
@@ -862,11 +1072,13 @@ function resolveProviderModelName(provider: Record<string, unknown>): string {
   return "";
 }
 
-async function firstExistingPath(paths: string[]): Promise<string | null> {
-  for (const path of paths) {
+async function firstExistingConfigCandidate(
+  candidates: OpenClawConfigCandidate[],
+): Promise<OpenClawConfigCandidate | null> {
+  for (const candidate of candidates) {
     try {
-      await access(path);
-      return path;
+      await access(candidate.path);
+      return candidate;
     } catch {
       // Keep searching.
     }
@@ -874,16 +1086,171 @@ async function firstExistingPath(paths: string[]): Promise<string | null> {
   return null;
 }
 
-function ensureRecord(
-  container: Record<string, unknown>,
-  key: string,
+async function readOpenClawConfigObject(
+  path: string,
+): Promise<Record<string, unknown>> {
+  const raw = await readFile(path, "utf8");
+  return parseOpenClawConfig(raw, path);
+}
+
+function parseOpenClawConfig(
+  raw: string,
+  path: string,
 ): Record<string, unknown> {
-  const value = container[key];
-  if (isRecord(value)) {
-    return value;
+  let parsed: unknown;
+  try {
+    parsed = JSON5.parse(raw) as unknown;
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to parse OpenClaw config at ${path}: ${message}`, {
+      cause: error,
+    });
   }
 
-  const created: Record<string, unknown> = {};
-  container[key] = created;
-  return created;
+  if (!isRecord(parsed)) {
+    throw new Error(`OpenClaw config at ${path} is not a JSON object.`);
+  }
+
+  return parsed;
+}
+
+function parseStrictOpenClawConfigForDirectWrite(
+  raw: string,
+  path: string,
+): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error: unknown) {
+    if (canParseOpenClawJson5(raw)) {
+      throw new Error(
+        `OpenClaw config at ${path} uses JSON5 syntax. Direct file edits are only supported for strict JSON. Start the OpenClaw Gateway or ensure the openclaw CLI is on PATH.`,
+        { cause: error },
+      );
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Failed to parse OpenClaw config at ${path} as strict JSON for direct file edit: ${message}`,
+      { cause: error },
+    );
+  }
+
+  if (!isRecord(parsed)) {
+    throw new Error(`OpenClaw config at ${path} is not a JSON object.`);
+  }
+
+  return parsed;
+}
+
+function canParseOpenClawJson5(raw: string): boolean {
+  try {
+    JSON5.parse(raw);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function applyConfigPatch(
+  target: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): void {
+  for (const [key, value] of Object.entries(patch)) {
+    const existing = target[key];
+    if (isRecord(existing) && isRecord(value)) {
+      applyConfigPatch(existing, value);
+      continue;
+    }
+    target[key] = cloneConfigValue(value);
+  }
+}
+
+function cloneConfigValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => cloneConfigValue(entry));
+  }
+  if (isRecord(value)) {
+    const cloned: Record<string, unknown> = {};
+    for (const [key, nestedValue] of Object.entries(value)) {
+      cloned[key] = cloneConfigValue(nestedValue);
+    }
+    return cloned;
+  }
+  return value;
+}
+
+function syncPreloadedConfigFromPatch(
+  preloaded: LoadedOpenClawConfig | undefined,
+  patch: Record<string, unknown>,
+): void {
+  if (!preloaded) {
+    return;
+  }
+  applyConfigPatch(preloaded.config, patch);
+}
+
+function buildOpenClawConfigWriteError(
+  operation: string,
+  failures: OpenClawConfigWriteFailure[],
+): Error {
+  const aggregateCause = new AggregateError(
+    failures.map((failure) => toError(failure.error)),
+    `OpenClaw config ${operation} attempts failed.`,
+  );
+  return new Error(
+    `Failed to ${operation}. Attempted paths: ${failures
+      .map((failure) => `${failure.path}: ${formatErrorMessage(failure.error)}`)
+      .join("; ")}.`,
+    { cause: aggregateCause },
+  );
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isNodeErrorCode(error: unknown, code: string): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as { code?: unknown }).code === code
+  );
+}
+
+function chunkToString(chunk: unknown): string {
+  return Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+}
+
+function readEnvPath(value: string | undefined): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function buildConfigCandidate(
+  root: string,
+  relativePath: string,
+  source: OpenClawConfigCandidateSource,
+): OpenClawConfigCandidate {
+  return {
+    path: join(root, ...relativePath.split("/")),
+    source,
+    sourceValue: root,
+    relativePath,
+  };
+}
+
+function formatConfigCandidateList(
+  candidates: OpenClawConfigCandidate[],
+): string {
+  return candidates
+    .map((candidate) => {
+      const relativePath = candidate.relativePath
+        ? `/${candidate.relativePath}`
+        : "";
+      return `${candidate.path} (${candidate.source}${relativePath})`;
+    })
+    .join(", ");
 }

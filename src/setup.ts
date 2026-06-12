@@ -10,10 +10,13 @@ import { getStatus, registerAccount, truncateKey } from "./client.js";
 import { readConfig, writeConfig } from "./config.js";
 import { detectCapabilities } from "./detect.js";
 import {
+  ensureClawrmaOpenClawPluginInstalled,
+  injectClawrmaWebSearchProvider,
   invertActiveHoursToSolverWindows,
   readOpenClawConfig,
   writeClawrmaApiKey,
 } from "./integrations/openclaw.js";
+import type { ClawrmaWebSearchProviderInjectionResult } from "./integrations/openclaw.js";
 import type {
   ClawrmaConfig,
   DetectionResult,
@@ -41,7 +44,7 @@ export interface SetupOptions {
     | "idle-always"
     | "custom"
     | "off";
-  webFetchFallback?: "yes" | "no";
+  webSearchFallback?: "yes" | "no";
   apiBaseUrl?: string;
 }
 
@@ -165,6 +168,8 @@ export async function runSetup(options: SetupOptions): Promise<void> {
           activeHours: null,
           existingSearchConfig: false,
           existingFirecrawlConfig: false,
+          existingClawrmaSearchConfig: false,
+          selectedSearchProvider: null,
         };
       } else {
         detection = await detectCapabilities(options.framework, {
@@ -214,15 +219,17 @@ export async function runSetup(options: SetupOptions): Promise<void> {
       await writeClawrmaApiKey(gatewayConfig.url, gatewayConfig.token, apiKey);
     }
 
-    if (
-      solverEnabled &&
-      options.framework === "openclaw" &&
-      options.webFetchFallback === "yes"
-    ) {
-      emitNotice(
-        "Firecrawl web_fetch fallback setup is disabled in this launch phase; OpenClaw config was not changed.",
-      );
-    }
+    const webSearchFallback = await configureWebSearchFallback({
+      framework: options.framework,
+      interactive,
+      askPrompt: prompts.ask,
+      flag: options.webSearchFallback,
+      openClawConfig,
+      gatewayUrl: gatewayConfig.url,
+      gatewayToken: gatewayConfig.token,
+      apiKey,
+      apiBaseUrl,
+    });
 
     const config: ClawrmaConfig = {
       version: 1,
@@ -244,6 +251,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
         injected: false,
         method: "none",
       },
+      webSearchFallback,
       notifications,
       welcomeCredit: DEFAULT_WELCOME_CREDIT_POINTS,
       installedAt: new Date().toISOString(),
@@ -286,6 +294,128 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   } finally {
     prompts?.close();
   }
+}
+
+interface ConfigureWebSearchFallbackInput {
+  framework: FrameworkType;
+  interactive: boolean;
+  askPrompt: AskPrompt;
+  flag: SetupOptions["webSearchFallback"];
+  openClawConfig: Awaited<ReturnType<typeof readOpenClawConfig>>;
+  gatewayUrl: string;
+  gatewayToken: string;
+  apiKey: string;
+  apiBaseUrl: string;
+}
+
+async function configureWebSearchFallback(
+  input: ConfigureWebSearchFallbackInput,
+): Promise<NonNullable<ClawrmaConfig["webSearchFallback"]>> {
+  if (input.framework !== "openclaw") {
+    return buildSkippedWebSearchFallback(null);
+  }
+
+  const selectedProvider = input.openClawConfig?.selectedSearchProvider ?? null;
+  const existingClawrma =
+    input.openClawConfig?.existingClawrmaSearchConfig === true;
+  const shouldConfigure = await resolveWebSearchFallbackEnabled(
+    input.interactive,
+    input.askPrompt,
+    input.flag,
+    selectedProvider,
+  );
+
+  if (!shouldConfigure) {
+    return existingClawrma
+      ? {
+          status: "existing-config",
+          method: "openclaw-managed-web-search",
+          configured: true,
+          selectedProvider,
+          preservedProvider:
+            selectedProvider && selectedProvider !== "clawrma"
+              ? selectedProvider
+              : null,
+          replacedProvider: null,
+        }
+      : buildSkippedWebSearchFallback(selectedProvider);
+  }
+
+  try {
+    await ensureClawrmaOpenClawPluginInstalled();
+    const result = await injectClawrmaWebSearchProvider(
+      input.gatewayUrl,
+      input.gatewayToken,
+      input.apiKey,
+      input.apiBaseUrl,
+      undefined,
+      { replaceExistingProvider: true },
+    );
+    emitResult("OpenClaw managed web_search provider configured");
+    return buildInjectedWebSearchFallback(result);
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error);
+    emitNotice(`OpenClaw managed web_search setup failed: ${detail}`);
+    return {
+      status: "failed",
+      method: "openclaw-managed-web-search",
+      configured: existingClawrma,
+      selectedProvider,
+      preservedProvider: selectedProvider,
+      replacedProvider: null,
+      error: detail,
+    };
+  }
+}
+
+async function resolveWebSearchFallbackEnabled(
+  interactive: boolean,
+  askPrompt: AskPrompt,
+  flag: SetupOptions["webSearchFallback"],
+  selectedProvider: string | null,
+): Promise<boolean> {
+  if (flag === "yes") {
+    return true;
+  }
+  if (flag === "no") {
+    return false;
+  }
+  if (!interactive) {
+    return false;
+  }
+
+  const prompt =
+    selectedProvider && selectedProvider !== "clawrma"
+      ? `Replace OpenClaw web_search provider '${selectedProvider}' with Clawrma managed search? (y/n)`
+      : "Enable Clawrma managed web_search fallback in OpenClaw? (y/n)";
+  const answer = (await askPrompt(prompt)).toLowerCase();
+  return answer === "y" || answer === "yes";
+}
+
+function buildInjectedWebSearchFallback(
+  result: ClawrmaWebSearchProviderInjectionResult,
+): NonNullable<ClawrmaConfig["webSearchFallback"]> {
+  return {
+    status: result.configured ? "injected" : "failed",
+    method: "openclaw-managed-web-search",
+    configured: result.configured,
+    selectedProvider: result.selectedProvider,
+    preservedProvider: result.preservedProvider,
+    replacedProvider: result.replacedProvider,
+  };
+}
+
+function buildSkippedWebSearchFallback(
+  selectedProvider: string | null,
+): NonNullable<ClawrmaConfig["webSearchFallback"]> {
+  return {
+    status: "skipped",
+    method: "none",
+    configured: false,
+    selectedProvider,
+    preservedProvider: selectedProvider,
+    replacedProvider: null,
+  };
 }
 
 async function resolveExistingAccount(

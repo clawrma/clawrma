@@ -1,0 +1,57 @@
+{
+  "id": "clawrma",
+  "activation": {
+    "onStartup": false
+  },
+  "uiHints": {
+    "webSearch.apiBaseUrl": {
+      "label": "Clawrma API Base URL",
+      "help": "Clawrma API endpoint for managed web search.",
+      "placeholder": "https://api.clawrma.com"
+    },
+    "webSearch.apiKey": {
+      "label": "Clawrma API Key",
+      "help": "Clawrma API key for managed web search.",
+      "sensitive": true,
+      "placeholder": "cr_..."
+    },
+    "webSearch.count": {
+      "label": "Default Result Count",
+      "help": "Default number of search results when the tool call omits count."
+    },
+    "webSearch.timeoutSeconds": {
+      "label": "Search Timeout",
+      "help": "Request timeout in seconds for Clawrma managed web search."
+    }
+  },
+  "contracts": {
+    "webSearchProviders": ["clawrma"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "webSearch": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "apiBaseUrl": {
+            "type": "string"
+          },
+          "apiKey": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "timeoutSeconds": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        }
+      }
+    }
+  }
+}

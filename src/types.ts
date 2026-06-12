@@ -41,6 +41,15 @@ export type TaskType = (typeof TASK_TYPES)[number];
 export type FrameworkType = "openclaw" | "none";
 
 /**
+ * Local state for OpenClaw managed web_search fallback setup.
+ */
+export type WebSearchFallbackStatus =
+  | "injected"
+  | "existing-config"
+  | "skipped"
+  | "failed";
+
+/**
  * Tagged fetch content format returned by browser-capable solvers.
  */
 export type FetchContentFormat = "text" | "markdown" | "html";
@@ -183,6 +192,18 @@ export interface ClawrmaConfig {
     method: string;
   };
   /**
+   * OpenClaw managed web_search fallback setup status.
+   */
+  webSearchFallback?: {
+    status: WebSearchFallbackStatus;
+    method: "openclaw-managed-web-search" | "none";
+    configured: boolean;
+    selectedProvider: string | null;
+    preservedProvider: string | null;
+    replacedProvider: string | null;
+    error?: string;
+  };
+  /**
    * Notification settings.
    */
   notifications: {
@@ -237,6 +258,8 @@ export interface DetectionResult {
   activeHours: ScheduleWindow[] | null;
   existingSearchConfig: boolean;
   existingFirecrawlConfig: boolean;
+  existingClawrmaSearchConfig: boolean;
+  selectedSearchProvider: string | null;
 }
 
 /**

@@ -2,7 +2,8 @@ import { spawn } from "node:child_process";
 import { access, lstat, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isRecord } from "../guards.js";
 import { setupLogger } from "../logging.js";
 import {
@@ -20,6 +21,7 @@ const DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
 const END_OF_DAY_MINUTES = 24 * 60;
 const END_OF_DAY_RENDER = "23:59";
 const OPENCLAW_CLI_PATCH_TIMEOUT_MS = 5_000;
+const OPENCLAW_PLUGIN_INSTALL_TIMEOUT_MS = 15_000;
 
 /** Environment variables that can affect OpenClaw config resolution. */
 export interface OpenClawConfigResolverEnv {
@@ -50,6 +52,26 @@ export interface ProviderInjectionResult {
   fallbackTotal: number;
 }
 
+/** Options for OpenClaw managed web_search provider injection. */
+export interface ClawrmaWebSearchProviderInjectionOptions {
+  replaceExistingProvider?: boolean;
+}
+
+/** Result from writing Clawrma managed web_search provider config. */
+export interface ClawrmaWebSearchProviderInjectionResult {
+  configured: boolean;
+  selected: boolean;
+  selectedProvider: string | null;
+  preservedProvider: string | null;
+  replacedProvider: string | null;
+}
+
+/** Result from installing the package-owned OpenClaw plugin. */
+export interface ClawrmaOpenClawPluginInstallResult {
+  installed: boolean;
+  pluginRoot: string;
+}
+
 export interface LoadedOpenClawConfig {
   config: Record<string, unknown>;
   path: string;
@@ -71,6 +93,8 @@ export interface OpenClawConfig {
   activeHoursTimezone: string | null;
   existingSearchConfig: boolean;
   existingFirecrawlConfig: boolean;
+  existingClawrmaSearchConfig: boolean;
+  selectedSearchProvider: string | null;
 }
 
 type DayName = (typeof DAY_ORDER)[number];
@@ -176,6 +200,8 @@ export async function readOpenClawConfig(): Promise<OpenClawConfig | null> {
     activeHoursTimezone: extractActiveHoursTimezone(parsed),
     existingSearchConfig: hasSearchConfig(parsed),
     existingFirecrawlConfig: hasFirecrawlConfig(parsed),
+    existingClawrmaSearchConfig: hasClawrmaWebSearchPluginConfig(parsed),
+    selectedSearchProvider: readSelectedWebSearchProvider(parsed),
   };
 }
 
@@ -232,6 +258,63 @@ export async function writeClawrmaApiKey(
     }),
     logSuccess: (path) => {
       setupLogger.info({ path }, "Wrote CLAWRMA_API_KEY to OpenClaw skill env");
+    },
+  });
+}
+
+/** Install or refresh the package-owned OpenClaw plugin entry. */
+export async function ensureClawrmaOpenClawPluginInstalled(): Promise<ClawrmaOpenClawPluginInstallResult> {
+  const pluginRoot = await resolveClawrmaPluginRoot();
+  await runOpenClawCli(["plugins", "install", "--link", pluginRoot], {
+    timeoutMs: OPENCLAW_PLUGIN_INSTALL_TIMEOUT_MS,
+    action: "plugin install",
+  });
+  setupLogger.info({ pluginRoot }, "Installed Clawrma OpenClaw plugin entry");
+  return { installed: true, pluginRoot };
+}
+
+/** Configure the Clawrma OpenClaw managed web_search provider. */
+export async function injectClawrmaWebSearchProvider(
+  gatewayUrl: string,
+  gatewayToken: string,
+  apiKey: string,
+  apiBaseUrl: string,
+  preloaded?: LoadedOpenClawConfig,
+  options: ClawrmaWebSearchProviderInjectionOptions = {},
+): Promise<ClawrmaWebSearchProviderInjectionResult> {
+  return writeOpenClawConfigPatch({
+    gatewayUrl,
+    gatewayToken,
+    operation: "inject Clawrma web_search provider into OpenClaw config",
+    preloaded,
+    buildPatch: (currentConfig) =>
+      buildClawrmaWebSearchProviderPatch(
+        currentConfig,
+        apiKey,
+        apiBaseUrl,
+        options,
+      ),
+    resultFromGateway: (plan, rpcPayload) => {
+      const resultingConfig = extractRpcConfig(rpcPayload);
+      if (Object.keys(resultingConfig).length === 0) {
+        return plan.result;
+      }
+      return buildClawrmaWebSearchProviderResult(
+        resultingConfig,
+        plan.result.replacedProvider,
+      );
+    },
+    logSuccess: (path, result) => {
+      setupLogger.info(
+        {
+          path,
+          selected: result.selected,
+          selectedProvider: result.selectedProvider,
+          preservedProvider: result.preservedProvider,
+          replacedProvider: result.replacedProvider,
+        },
+        "Injected Clawrma web_search provider into OpenClaw config",
+      );
     },
   });
 }
@@ -479,6 +562,76 @@ function buildClawrmaApiKeyPatch(apiKey: string): Record<string, unknown> {
   };
 }
 
+function buildClawrmaWebSearchProviderPatch(
+  currentConfig: Record<string, unknown>,
+  apiKey: string,
+  apiBaseUrl: string,
+  options: ClawrmaWebSearchProviderInjectionOptions,
+): OpenClawConfigPatchPlan<ClawrmaWebSearchProviderInjectionResult> {
+  const currentProvider = readSelectedWebSearchProvider(currentConfig);
+  const shouldSelect =
+    currentProvider === null ||
+    currentProvider === CLAWRMA_PROVIDER_ID ||
+    options.replaceExistingProvider === true;
+  const patch: Record<string, unknown> = {
+    plugins: {
+      entries: {
+        [CLAWRMA_PROVIDER_ID]: {
+          enabled: true,
+          config: {
+            webSearch: {
+              apiBaseUrl: normalizeApiBaseUrlForConfig(apiBaseUrl),
+              apiKey,
+            },
+          },
+        },
+      },
+    },
+  };
+
+  if (shouldSelect) {
+    patch.tools = {
+      web: {
+        search: {
+          enabled: true,
+          provider: CLAWRMA_PROVIDER_ID,
+        },
+      },
+    };
+  }
+
+  return {
+    patch,
+    result: {
+      configured: true,
+      selected: shouldSelect,
+      selectedProvider: shouldSelect ? CLAWRMA_PROVIDER_ID : currentProvider,
+      preservedProvider: shouldSelect ? null : currentProvider,
+      replacedProvider:
+        shouldSelect &&
+        currentProvider !== null &&
+        currentProvider !== CLAWRMA_PROVIDER_ID
+          ? currentProvider
+          : null,
+    },
+  };
+}
+
+function buildClawrmaWebSearchProviderResult(
+  config: Record<string, unknown>,
+  replacedProvider: string | null,
+): ClawrmaWebSearchProviderInjectionResult {
+  const selectedProvider = readSelectedWebSearchProvider(config);
+  const selected = selectedProvider === CLAWRMA_PROVIDER_ID;
+  return {
+    configured: hasClawrmaWebSearchPluginConfig(config),
+    selected,
+    selectedProvider,
+    preservedProvider: selected ? null : selectedProvider,
+    replacedProvider,
+  };
+}
+
 async function writeOpenClawConfigPatch<TResult>(
   options: OpenClawConfigWriteOptions<TResult>,
 ): Promise<TResult> {
@@ -697,6 +850,11 @@ function normalizeApiBaseUrl(apiBaseUrl: string): string {
   return `${trimmed}/`;
 }
 
+function normalizeApiBaseUrlForConfig(apiBaseUrl: string): string {
+  const normalized = normalizeApiBaseUrl(apiBaseUrl);
+  return normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
+}
+
 function readProvidersFromConfig(
   config: Record<string, unknown>,
 ): OpenClawProviderConfig[] {
@@ -733,6 +891,10 @@ function readProvidersFromConfig(
 }
 
 function hasSearchConfig(config: Record<string, unknown>): boolean {
+  if (readSelectedWebSearchProvider(config) !== null) {
+    return true;
+  }
+
   const fromConfig = normalizeConfiguredString(
     getNestedValue(config, ["tools", "web", "search", "apiKey"]),
   );
@@ -752,6 +914,36 @@ function hasFirecrawlConfig(config: Record<string, unknown>): boolean {
       "firecrawl",
       "enabled",
     ]) === true
+  );
+}
+
+function readSelectedWebSearchProvider(
+  config: Record<string, unknown>,
+): string | null {
+  return (
+    normalizeConfiguredString(
+      getNestedValue(config, ["tools", "web", "search", "provider"]),
+    ) ?? null
+  );
+}
+
+function hasClawrmaWebSearchPluginConfig(
+  config: Record<string, unknown>,
+): boolean {
+  const webSearch = getNestedValue(config, [
+    "plugins",
+    "entries",
+    CLAWRMA_PROVIDER_ID,
+    "config",
+    "webSearch",
+  ]);
+  if (!isRecord(webSearch)) {
+    return false;
+  }
+
+  return (
+    normalizeConfiguredString(webSearch.apiBaseUrl) !== null &&
+    normalizeConfiguredString(webSearch.apiKey) !== null
   );
 }
 
@@ -854,8 +1046,56 @@ async function gatewayRpc(
 async function patchOpenClawConfigWithCli(
   patch: Record<string, unknown>,
 ): Promise<void> {
+  await runOpenClawCli(["config", "patch", "--stdin"], {
+    stdin: `${JSON.stringify(patch, null, 2)}\n`,
+    timeoutMs: OPENCLAW_CLI_PATCH_TIMEOUT_MS,
+    action: "config patch",
+  });
+}
+
+async function resolveClawrmaPluginRoot(): Promise<string> {
+  let currentDir = dirname(fileURLToPath(import.meta.url));
+
+  for (let depth = 0; depth < 8; depth += 1) {
+    try {
+      await access(join(currentDir, "openclaw.plugin.json"));
+      return currentDir;
+    } catch (error: unknown) {
+      if (
+        !isNodeErrorCode(error, "ENOENT") &&
+        !isNodeErrorCode(error, "ENOTDIR")
+      ) {
+        throw new Error(
+          `Failed to inspect Clawrma OpenClaw plugin root at ${currentDir}.`,
+          { cause: error },
+        );
+      }
+    }
+
+    const parent = dirname(currentDir);
+    if (parent === currentDir) {
+      break;
+    }
+    currentDir = parent;
+  }
+
+  throw new Error(
+    "Could not locate openclaw.plugin.json for the installed Clawrma package.",
+  );
+}
+
+interface OpenClawCliOptions {
+  stdin?: string;
+  timeoutMs: number;
+  action: string;
+}
+
+async function runOpenClawCli(
+  args: string[],
+  options: OpenClawCliOptions,
+): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const child = spawn("openclaw", ["config", "patch", "--stdin"], {
+    const child = spawn("openclaw", args, {
       env: process.env,
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
@@ -880,10 +1120,10 @@ async function patchOpenClawConfigWithCli(
       child.kill();
       settle(
         new Error(
-          `OpenClaw CLI config patch timed out after ${OPENCLAW_CLI_PATCH_TIMEOUT_MS}ms.`,
+          `OpenClaw CLI ${options.action} timed out after ${options.timeoutMs}ms.`,
         ),
       );
-    }, OPENCLAW_CLI_PATCH_TIMEOUT_MS);
+    }, options.timeoutMs);
 
     child.stderr.on("data", (chunk: unknown) => {
       stderr += chunkToString(chunk);
@@ -892,13 +1132,18 @@ async function patchOpenClawConfigWithCli(
     child.on("error", (error: unknown) => {
       if (isNodeErrorCode(error, "ENOENT")) {
         settle(
-          new Error("OpenClaw CLI unavailable: openclaw not found on PATH.", {
-            cause: error,
-          }),
+          new Error(
+            `OpenClaw CLI unavailable for ${options.action}: openclaw not found on PATH.`,
+            { cause: error },
+          ),
         );
         return;
       }
-      settle(new Error("Failed to start OpenClaw CLI.", { cause: error }));
+      settle(
+        new Error(`Failed to start OpenClaw CLI for ${options.action}.`, {
+          cause: error,
+        }),
+      );
     });
 
     child.on("close", (code, signal) => {
@@ -912,13 +1157,13 @@ async function patchOpenClawConfigWithCli(
       settle(
         new Error(
           stderrDetails
-            ? `OpenClaw CLI config patch failed with ${exitDetails}: ${stderrDetails}`
-            : `OpenClaw CLI config patch failed with ${exitDetails}.`,
+            ? `OpenClaw CLI ${options.action} failed with ${exitDetails}: ${stderrDetails}`
+            : `OpenClaw CLI ${options.action} failed with ${exitDetails}.`,
         ),
       );
     });
 
-    child.stdin.end(`${JSON.stringify(patch, null, 2)}\n`, "utf8");
+    child.stdin.end(options.stdin ?? "", "utf8");
   });
 }
 

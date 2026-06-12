@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   readConfig: vi.fn(),
   writeConfig: vi.fn(),
   detectCapabilities: vi.fn(),
+  ensureClawrmaOpenClawPluginInstalled: vi.fn(),
+  injectClawrmaWebSearchProvider: vi.fn(),
   injectFirecrawlConfig: vi.fn(),
   injectProvider: vi.fn(),
   invertActiveHoursToSolverWindows: vi.fn((windows: unknown) => windows),
@@ -37,6 +39,9 @@ vi.mock("./detect.js", () => ({
 }));
 
 vi.mock("./integrations/openclaw.js", () => ({
+  ensureClawrmaOpenClawPluginInstalled:
+    mocks.ensureClawrmaOpenClawPluginInstalled,
+  injectClawrmaWebSearchProvider: mocks.injectClawrmaWebSearchProvider,
   injectFirecrawlConfig: mocks.injectFirecrawlConfig,
   injectProvider: mocks.injectProvider,
   invertActiveHoursToSolverWindows: mocks.invertActiveHoursToSolverWindows,
@@ -60,6 +65,8 @@ function makeDetectionResult(): DetectionResult {
     activeHours: null,
     existingSearchConfig: false,
     existingFirecrawlConfig: false,
+    existingClawrmaSearchConfig: false,
+    selectedSearchProvider: null,
   };
 }
 
@@ -99,6 +106,8 @@ describe("runSetup non-interactive mode", () => {
     mocks.readConfig.mockReset();
     mocks.writeConfig.mockReset();
     mocks.detectCapabilities.mockReset();
+    mocks.ensureClawrmaOpenClawPluginInstalled.mockReset();
+    mocks.injectClawrmaWebSearchProvider.mockReset();
     mocks.injectFirecrawlConfig.mockReset();
     mocks.injectProvider.mockReset();
     mocks.invertActiveHoursToSolverWindows.mockClear();
@@ -129,7 +138,7 @@ describe("runSetup non-interactive mode", () => {
     );
   });
 
-  it("does not require web-fetch-fallback for non-interactive openclaw setup", async () => {
+  it("does not require web-search-fallback for non-interactive openclaw setup", async () => {
     mocks.detectCapabilities.mockResolvedValue(makeDetectionResult());
     mocks.registerAccount.mockResolvedValue({
       accountId: "cr_usr_test",
@@ -137,6 +146,10 @@ describe("runSetup non-interactive mode", () => {
     });
     mocks.getStatus.mockResolvedValue(makeStatusResponse());
     mocks.writeClawrmaApiKey.mockResolvedValue(undefined);
+    mocks.ensureClawrmaOpenClawPluginInstalled.mockResolvedValue({
+      installed: true,
+      pluginRoot: "/tmp/clawrma",
+    });
     mocks.readOpenClawConfig.mockResolvedValue(null);
     mocks.writeConfig.mockResolvedValue(undefined);
 
@@ -168,7 +181,7 @@ describe("runSetup non-interactive mode", () => {
       interactive: false,
       solver: "on",
       schedule: "overnight",
-      webFetchFallback: "no",
+      webSearchFallback: "no",
     });
 
     const combinedOutput = logSpy.mock.calls
@@ -196,13 +209,21 @@ describe("runSetup non-interactive mode", () => {
           injected: false,
           method: "none",
         },
+        webSearchFallback: {
+          status: "skipped",
+          method: "none",
+          configured: false,
+          selectedProvider: null,
+          preservedProvider: null,
+          replacedProvider: null,
+        },
       }),
     );
     expect(mocks.writeConfig.mock.calls[0]?.[0]).not.toHaveProperty("provider");
     expect(mocks.injectProvider).not.toHaveBeenCalled();
   });
 
-  it("does not invoke Firecrawl setup even when web-fetch-fallback is requested", async () => {
+  it("configures Clawrma managed search when web-search-fallback is requested", async () => {
     mocks.detectCapabilities.mockResolvedValue(makeDetectionResult());
     mocks.registerAccount.mockResolvedValue({
       accountId: "cr_usr_test",
@@ -211,6 +232,13 @@ describe("runSetup non-interactive mode", () => {
     mocks.getStatus.mockResolvedValue(makeStatusResponse());
     mocks.writeClawrmaApiKey.mockResolvedValue(undefined);
     mocks.readOpenClawConfig.mockResolvedValue(null);
+    mocks.injectClawrmaWebSearchProvider.mockResolvedValue({
+      configured: true,
+      selected: true,
+      selectedProvider: "clawrma",
+      preservedProvider: null,
+      replacedProvider: null,
+    });
     mocks.writeConfig.mockResolvedValue(undefined);
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -221,11 +249,20 @@ describe("runSetup non-interactive mode", () => {
         interactive: false,
         solver: "on",
         schedule: "overnight",
-        webFetchFallback: "yes",
+        webSearchFallback: "yes",
       }),
     ).resolves.toBeUndefined();
 
     expect(mocks.injectFirecrawlConfig).not.toHaveBeenCalled();
+    expect(mocks.ensureClawrmaOpenClawPluginInstalled).toHaveBeenCalledOnce();
+    expect(mocks.injectClawrmaWebSearchProvider).toHaveBeenCalledWith(
+      "",
+      "",
+      "cr_sk_test",
+      "https://api.clawrma.com",
+      undefined,
+      { replaceExistingProvider: true },
+    );
     expect(mocks.injectProvider).not.toHaveBeenCalled();
     expect(mocks.writeConfig).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -236,6 +273,14 @@ describe("runSetup non-interactive mode", () => {
           injected: false,
           method: "none",
         },
+        webSearchFallback: {
+          status: "injected",
+          method: "openclaw-managed-web-search",
+          configured: true,
+          selectedProvider: "clawrma",
+          preservedProvider: null,
+          replacedProvider: null,
+        },
       }),
     );
 
@@ -243,10 +288,126 @@ describe("runSetup non-interactive mode", () => {
       .map((call) => String(call[0] ?? ""))
       .join("\n");
     expect(combinedOutput).toContain(
-      "Firecrawl web_fetch fallback setup is disabled in this launch phase; OpenClaw config was not changed.",
+      "OpenClaw managed web_search provider configured",
     );
     expect(combinedOutput).not.toContain(
       "Configure Clawrma as Firecrawl backend for web_fetch fallback",
+    );
+  });
+
+  it("records an existing Clawrma managed search config when setup skips injection", async () => {
+    mocks.registerAccount.mockResolvedValue({
+      accountId: "cr_usr_test",
+      apiKey: "cr_sk_test",
+    });
+    mocks.getStatus.mockResolvedValue(makeStatusResponse());
+    mocks.writeClawrmaApiKey.mockResolvedValue(undefined);
+    mocks.readOpenClawConfig.mockResolvedValue({
+      activeHoursTimezone: null,
+      existingClawrmaSearchConfig: true,
+      selectedSearchProvider: "clawrma",
+    });
+    mocks.writeConfig.mockResolvedValue(undefined);
+
+    await runSetup({
+      framework: "openclaw",
+      interactive: false,
+      solver: "off",
+      webSearchFallback: "no",
+    });
+
+    expect(mocks.injectClawrmaWebSearchProvider).not.toHaveBeenCalled();
+    expect(mocks.writeConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        webSearchFallback: {
+          status: "existing-config",
+          method: "openclaw-managed-web-search",
+          configured: true,
+          selectedProvider: "clawrma",
+          preservedProvider: null,
+          replacedProvider: null,
+        },
+      }),
+    );
+  });
+
+  it("records a preserved non-Clawrma provider when managed search setup is skipped", async () => {
+    mocks.registerAccount.mockResolvedValue({
+      accountId: "cr_usr_test",
+      apiKey: "cr_sk_test",
+    });
+    mocks.getStatus.mockResolvedValue(makeStatusResponse());
+    mocks.writeClawrmaApiKey.mockResolvedValue(undefined);
+    mocks.readOpenClawConfig.mockResolvedValue({
+      activeHoursTimezone: null,
+      existingClawrmaSearchConfig: false,
+      selectedSearchProvider: "brave",
+    });
+    mocks.writeConfig.mockResolvedValue(undefined);
+
+    await runSetup({
+      framework: "openclaw",
+      interactive: false,
+      solver: "off",
+    });
+
+    expect(mocks.writeConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        webSearchFallback: {
+          status: "skipped",
+          method: "none",
+          configured: false,
+          selectedProvider: "brave",
+          preservedProvider: "brave",
+          replacedProvider: null,
+        },
+      }),
+    );
+  });
+
+  it("records failed managed search setup with a visible notice", async () => {
+    mocks.registerAccount.mockResolvedValue({
+      accountId: "cr_usr_test",
+      apiKey: "cr_sk_test",
+    });
+    mocks.getStatus.mockResolvedValue(makeStatusResponse());
+    mocks.writeClawrmaApiKey.mockResolvedValue(undefined);
+    mocks.readOpenClawConfig.mockResolvedValue({
+      activeHoursTimezone: null,
+      existingClawrmaSearchConfig: false,
+      selectedSearchProvider: "firecrawl",
+    });
+    mocks.injectClawrmaWebSearchProvider.mockRejectedValue(
+      new Error("OpenClaw config not found"),
+    );
+    mocks.writeConfig.mockResolvedValue(undefined);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await runSetup({
+      framework: "openclaw",
+      interactive: false,
+      solver: "off",
+      webSearchFallback: "yes",
+    });
+
+    expect(mocks.writeConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        webSearchFallback: {
+          status: "failed",
+          method: "openclaw-managed-web-search",
+          configured: false,
+          selectedProvider: "firecrawl",
+          preservedProvider: "firecrawl",
+          replacedProvider: null,
+          error: "OpenClaw config not found",
+        },
+      }),
+    );
+    const combinedOutput = logSpy.mock.calls
+      .map((call) => String(call[0] ?? ""))
+      .join("\n");
+    expect(combinedOutput).toContain(
+      "OpenClaw managed web_search setup failed: OpenClaw config not found",
     );
   });
 
@@ -261,7 +422,7 @@ describe("runSetup non-interactive mode", () => {
     mocks.readOpenClawConfig.mockResolvedValue(null);
     mocks.writeConfig.mockResolvedValue(undefined);
     mocks.createInterface.mockReturnValue({
-      question: vi.fn().mockResolvedValueOnce("n"),
+      question: vi.fn().mockResolvedValueOnce("n").mockResolvedValueOnce("n"),
       close: vi.fn(),
     });
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -296,7 +457,8 @@ describe("runSetup non-interactive mode", () => {
     const question = vi
       .fn()
       .mockResolvedValueOnce("y")
-      .mockResolvedValueOnce("overnight");
+      .mockResolvedValueOnce("overnight")
+      .mockResolvedValueOnce("n");
     mocks.createInterface.mockReturnValue({
       question,
       close: vi.fn(),
@@ -308,7 +470,7 @@ describe("runSetup non-interactive mode", () => {
       interactive: true,
     });
 
-    expect(question).toHaveBeenCalledTimes(2);
+    expect(question).toHaveBeenCalledTimes(3);
     const combinedOutput = logSpy.mock.calls
       .map((call) => String(call[0] ?? ""))
       .join("\n");
@@ -336,7 +498,10 @@ describe("runSetup non-interactive mode", () => {
     mocks.writeClawrmaApiKey.mockResolvedValue(undefined);
     mocks.readOpenClawConfig.mockResolvedValue(null);
     mocks.writeConfig.mockResolvedValue(undefined);
-    const question = vi.fn().mockResolvedValueOnce("n");
+    const question = vi
+      .fn()
+      .mockResolvedValueOnce("n")
+      .mockResolvedValueOnce("n");
     mocks.createInterface.mockReturnValue({
       question,
       close: vi.fn(),
@@ -348,7 +513,7 @@ describe("runSetup non-interactive mode", () => {
       interactive: true,
     });
 
-    expect(question).toHaveBeenCalledTimes(1);
+    expect(question).toHaveBeenCalledTimes(2);
     expect(mocks.detectCapabilities).not.toHaveBeenCalled();
     expect(mocks.writeConfig).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -378,7 +543,7 @@ describe("runSetup non-interactive mode", () => {
       "Per-token providers are excluded from inference solving by default to avoid unexpected API costs.",
     );
     expect(combinedOutput).not.toContain(
-      "Firecrawl web_fetch fallback setup is disabled in this launch phase; OpenClaw config was not changed.",
+      "managed web_search provider configured",
     );
     expect(combinedOutput).not.toContain("✓ Capabilities");
     expect(combinedOutput).not.toContain("review sandbox/container limits");
@@ -495,7 +660,7 @@ describe("runSetup non-interactive mode", () => {
       framework: "openclaw",
       interactive: false,
       solver: "off",
-      webFetchFallback: "yes",
+      webSearchFallback: "no",
     });
 
     const combinedOutput = logSpy.mock.calls
@@ -512,8 +677,9 @@ describe("runSetup non-interactive mode", () => {
       "Per-token providers are excluded from inference solving by default to avoid unexpected API costs.",
     );
     expect(combinedOutput).not.toContain(
-      "Firecrawl web_fetch fallback setup is disabled in this launch phase; OpenClaw config was not changed.",
+      "managed web_search provider configured",
     );
+    expect(combinedOutput).not.toContain("managed web_search setup failed");
     expect(combinedOutput).not.toContain("✓ Capabilities");
     expect(combinedOutput).not.toContain("review sandbox/container limits");
     expect(combinedOutput).not.toContain("✓ Solver scope");

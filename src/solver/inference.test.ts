@@ -90,6 +90,8 @@ function makeOpenClawConfig(
     activeHoursTimezone: null,
     existingSearchConfig: false,
     existingFirecrawlConfig: false,
+    existingClawrmaSearchConfig: false,
+    selectedSearchProvider: null,
   };
 }
 

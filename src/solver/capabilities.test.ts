@@ -82,6 +82,8 @@ function makeDetectionResult(
     activeHours: null,
     existingSearchConfig: false,
     existingFirecrawlConfig: false,
+    existingClawrmaSearchConfig: false,
+    selectedSearchProvider: null,
   };
 }
 
@@ -326,6 +328,8 @@ describe("solver capabilities", () => {
         activeHours: null,
         existingSearchConfig: false,
         existingFirecrawlConfig: false,
+        existingClawrmaSearchConfig: false,
+        selectedSearchProvider: null,
       }),
     });
 

@@ -203,6 +203,25 @@ describe("config read/write", () => {
     await expect(readConfig()).resolves.toEqual(config);
   });
 
+  it("round-trips managed web search fallback state", async () => {
+    const { writeConfig, readConfig } = await import("./config.js");
+    const config = {
+      ...makeConfig(),
+      webSearchFallback: {
+        status: "injected" as const,
+        method: "openclaw-managed-web-search" as const,
+        configured: true,
+        selectedProvider: "clawrma",
+        preservedProvider: null,
+        replacedProvider: "brave",
+      },
+    };
+
+    await writeConfig(config);
+
+    await expect(readConfig()).resolves.toEqual(config);
+  });
+
   it("throws when persisted config fails schema validation", async () => {
     const { readConfig } = await import("./config.js");
 
@@ -234,6 +253,31 @@ describe("config read/write", () => {
           cliSandbox: {
             retainFailedWorkspaces: "yes",
           },
+        },
+      }),
+      "utf8",
+    );
+
+    await expect(readConfig()).rejects.toThrow(
+      "does not match ClawrmaConfig schema",
+    );
+  });
+
+  it("rejects invalid managed web search fallback state from disk", async () => {
+    const { readConfig } = await import("./config.js");
+
+    await mkdir(testPaths.configDir, { recursive: true });
+    await writeFile(
+      testPaths.configPath,
+      JSON.stringify({
+        ...makeConfig(),
+        webSearchFallback: {
+          status: "owned",
+          method: "openclaw-managed-web-search",
+          configured: true,
+          selectedProvider: "clawrma",
+          preservedProvider: null,
+          replacedProvider: null,
         },
       }),
       "utf8",

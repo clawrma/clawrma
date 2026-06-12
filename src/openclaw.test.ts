@@ -258,6 +258,30 @@ describe("injectFirecrawlConfig", () => {
   });
 });
 
+describe("ensureClawrmaOpenClawPluginInstalled", () => {
+  it("links the installed Clawrma package through the OpenClaw plugin CLI", async () => {
+    const home = await mkdtemp(join(tmpdir(), "clawrma-openclaw-home-"));
+    const { binDir, capturePath } = await installFakeOpenClawCli(home);
+    vi.stubEnv("CLAWRMA_OPENCLAW_CAPTURE", capturePath);
+    vi.stubEnv("PATH", `${binDir}${delimiter}${ORIGINAL_PATH ?? ""}`);
+
+    const { ensureClawrmaOpenClawPluginInstalled } =
+      await loadModuleWithHome(home);
+
+    const result = await ensureClawrmaOpenClawPluginInstalled();
+
+    expect(result.installed).toBe(true);
+    expect(result.pluginRoot).toMatch(/clawrma$/);
+    const capture = await readFakeOpenClawCliCapture(capturePath);
+    expect(capture.argv).toEqual([
+      "plugins",
+      "install",
+      "--link",
+      result.pluginRoot,
+    ]);
+  });
+});
+
 describe("injectProvider", () => {
   it("injects clawrma/strong fallback and strong model metadata via RPC", async () => {
     const home = await mkdtemp(join(tmpdir(), "clawrma-openclaw-home-"));
@@ -477,6 +501,280 @@ describe("injectProvider", () => {
         defaults: {
           model: {
             fallbacks: ["clawrma/strong"],
+          },
+        },
+      },
+    });
+  });
+});
+
+describe("injectClawrmaWebSearchProvider", () => {
+  it("configures Clawrma managed web_search and selects it when no provider is selected", async () => {
+    const home = await mkdtemp(join(tmpdir(), "clawrma-openclaw-home-"));
+    const { injectClawrmaWebSearchProvider } = await loadModuleWithHome(home);
+    const requests: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(
+      async (_url: string | URL | globalThis.Request, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<
+          string,
+          unknown
+        >;
+        requests.push(body);
+        if (body.method === "config.get") {
+          return okRpcResponse({
+            result: {
+              hash: "hash-web-search-1",
+              config: {},
+            },
+          });
+        }
+        if (body.method === "config.patch") {
+          return okRpcResponse({
+            result: {
+              config: {
+                plugins: {
+                  entries: {
+                    clawrma: {
+                      enabled: true,
+                      config: {
+                        webSearch: {
+                          apiBaseUrl: "https://clawrma.test",
+                          apiKey: "cr_sk_search",
+                        },
+                      },
+                    },
+                  },
+                },
+                tools: {
+                  web: {
+                    search: {
+                      enabled: true,
+                      provider: "clawrma",
+                    },
+                  },
+                },
+              },
+            },
+          });
+        }
+        throw new Error(`Unexpected RPC method: ${String(body.method)}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    const result = await injectClawrmaWebSearchProvider(
+      "https://gateway.example.com/rpc",
+      "gateway-token",
+      "cr_sk_search",
+      "https://clawrma.test/",
+    );
+
+    expect(result).toEqual({
+      configured: true,
+      selected: true,
+      selectedProvider: "clawrma",
+      preservedProvider: null,
+      replacedProvider: null,
+    });
+    const patchRequest = requests.find(
+      (request) => request.method === "config.patch",
+    );
+    expect(patchRequest?.params).toMatchObject({
+      baseHash: "hash-web-search-1",
+    });
+    const patchParams = patchRequest?.params as { raw: string };
+    expect(JSON.parse(patchParams.raw)).toEqual({
+      plugins: {
+        entries: {
+          clawrma: {
+            enabled: true,
+            config: {
+              webSearch: {
+                apiBaseUrl: "https://clawrma.test",
+                apiKey: "cr_sk_search",
+              },
+            },
+          },
+        },
+      },
+      tools: {
+        web: {
+          search: {
+            enabled: true,
+            provider: "clawrma",
+          },
+        },
+      },
+    });
+  });
+
+  it("preserves an existing non-Clawrma web_search provider unless replacement is requested", async () => {
+    const home = await mkdtemp(join(tmpdir(), "clawrma-openclaw-home-"));
+    const { injectClawrmaWebSearchProvider } = await loadModuleWithHome(home);
+    const requests: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(
+      async (_url: string | URL | globalThis.Request, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<
+          string,
+          unknown
+        >;
+        requests.push(body);
+        if (body.method === "config.get") {
+          return okRpcResponse({
+            result: {
+              config: {
+                tools: {
+                  web: {
+                    search: {
+                      provider: "brave",
+                    },
+                  },
+                },
+              },
+            },
+          });
+        }
+        if (body.method === "config.patch") {
+          return okRpcResponse({
+            result: {
+              config: {
+                plugins: {
+                  entries: {
+                    clawrma: {
+                      enabled: true,
+                      config: {
+                        webSearch: {
+                          apiBaseUrl: "https://clawrma.test",
+                          apiKey: "cr_sk_search",
+                        },
+                      },
+                    },
+                  },
+                },
+                tools: {
+                  web: {
+                    search: {
+                      provider: "brave",
+                    },
+                  },
+                },
+              },
+            },
+          });
+        }
+        throw new Error(`Unexpected RPC method: ${String(body.method)}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    const result = await injectClawrmaWebSearchProvider(
+      "https://gateway.example.com/rpc",
+      "gateway-token",
+      "cr_sk_search",
+      "https://clawrma.test",
+    );
+
+    expect(result).toEqual({
+      configured: true,
+      selected: false,
+      selectedProvider: "brave",
+      preservedProvider: "brave",
+      replacedProvider: null,
+    });
+    const patchRequest = requests.find(
+      (request) => request.method === "config.patch",
+    );
+    const patchParams = patchRequest?.params as { raw: string };
+    const patch = JSON.parse(patchParams.raw) as Record<string, unknown>;
+    expect(patch).toEqual({
+      plugins: {
+        entries: {
+          clawrma: {
+            enabled: true,
+            config: {
+              webSearch: {
+                apiBaseUrl: "https://clawrma.test",
+                apiKey: "cr_sk_search",
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it("replaces an existing web_search provider only when explicitly requested", async () => {
+    const home = await mkdtemp(join(tmpdir(), "clawrma-openclaw-home-"));
+    const configDir = join(home, ".openclaw");
+    const configPath = join(configDir, "openclaw.json");
+    const emptyBinDir = join(home, "empty-bin");
+    await mkdir(configDir, { recursive: true });
+    await mkdir(emptyBinDir, { recursive: true });
+    await writeFile(
+      configPath,
+      JSON.stringify(
+        {
+          tools: {
+            web: {
+              search: {
+                enabled: true,
+                provider: "firecrawl",
+              },
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    vi.stubEnv("PATH", emptyBinDir);
+
+    const { injectClawrmaWebSearchProvider } = await loadModuleWithHome(home);
+    const fetchMock = vi.fn(async () =>
+      okRpcResponse({ error: { message: "gateway unavailable" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    const result = await injectClawrmaWebSearchProvider(
+      "https://gateway.example.com/rpc",
+      "gateway-token",
+      "cr_sk_search",
+      "https://clawrma.test",
+      undefined,
+      { replaceExistingProvider: true },
+    );
+
+    expect(result).toEqual({
+      configured: true,
+      selected: true,
+      selectedProvider: "clawrma",
+      preservedProvider: null,
+      replacedProvider: "firecrawl",
+    });
+    const written = JSON.parse(await readFile(configPath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(written).toMatchObject({
+      plugins: {
+        entries: {
+          clawrma: {
+            enabled: true,
+            config: {
+              webSearch: {
+                apiBaseUrl: "https://clawrma.test",
+                apiKey: "cr_sk_search",
+              },
+            },
+          },
+        },
+      },
+      tools: {
+        web: {
+          search: {
+            enabled: true,
+            provider: "clawrma",
           },
         },
       },
@@ -919,5 +1217,82 @@ describe("readOpenClawConfig", () => {
     const config = await readOpenClawConfig();
 
     expect(config?.existingSearchConfig).toBe(false);
+  });
+
+  it("distinguishes selected managed search providers from Clawrma plugin config", async () => {
+    const home = await mkdtemp(join(tmpdir(), "clawrma-openclaw-home-"));
+    const configDir = join(home, ".openclaw");
+    const configPath = join(configDir, "openclaw.json");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      configPath,
+      JSON.stringify(
+        {
+          tools: {
+            web: {
+              search: {
+                enabled: true,
+                provider: "brave",
+              },
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const { readOpenClawConfig } = await loadModuleWithHome(home);
+    const config = await readOpenClawConfig();
+
+    expect(config?.existingSearchConfig).toBe(true);
+    expect(config?.existingClawrmaSearchConfig).toBe(false);
+    expect(config?.selectedSearchProvider).toBe("brave");
+  });
+
+  it("detects complete Clawrma managed search plugin config", async () => {
+    const home = await mkdtemp(join(tmpdir(), "clawrma-openclaw-home-"));
+    const configDir = join(home, ".openclaw");
+    const configPath = join(configDir, "openclaw.json");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      configPath,
+      JSON.stringify(
+        {
+          plugins: {
+            entries: {
+              clawrma: {
+                enabled: true,
+                config: {
+                  webSearch: {
+                    apiBaseUrl: "https://api.clawrma.com",
+                    apiKey: "cr_sk_test",
+                  },
+                },
+              },
+            },
+          },
+          tools: {
+            web: {
+              search: {
+                enabled: true,
+                provider: "clawrma",
+              },
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const { readOpenClawConfig } = await loadModuleWithHome(home);
+    const config = await readOpenClawConfig();
+
+    expect(config?.existingSearchConfig).toBe(true);
+    expect(config?.existingClawrmaSearchConfig).toBe(true);
+    expect(config?.selectedSearchProvider).toBe("clawrma");
   });
 });

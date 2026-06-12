@@ -25,9 +25,16 @@ import type {
   CliSandboxConfig,
   FrameworkType,
   TaskType,
+  WebSearchFallbackStatus,
 } from "./types.js";
 const FRAMEWORK_TYPES: FrameworkType[] = ["openclaw", "none"];
 const SCHEDULE_SOURCES = ["openclaw-heartbeat", "manual", "unknown"] as const;
+const WEB_SEARCH_FALLBACK_STATUSES: WebSearchFallbackStatus[] = [
+  "injected",
+  "existing-config",
+  "skipped",
+  "failed",
+];
 
 const CLAWRMA_CONFIG_SCHEMA: Record<string, unknown> = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -122,6 +129,30 @@ const CLAWRMA_CONFIG_SCHEMA: Record<string, unknown> = {
       properties: {
         injected: { type: "boolean" },
         method: { type: "string" },
+      },
+    },
+    webSearchFallback: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "status",
+        "method",
+        "configured",
+        "selectedProvider",
+        "preservedProvider",
+        "replacedProvider",
+      ],
+      properties: {
+        status: { type: "string", enum: WEB_SEARCH_FALLBACK_STATUSES },
+        method: {
+          type: "string",
+          enum: ["openclaw-managed-web-search", "none"],
+        },
+        configured: { type: "boolean" },
+        selectedProvider: { type: ["string", "null"] },
+        preservedProvider: { type: ["string", "null"] },
+        replacedProvider: { type: ["string", "null"] },
+        error: { type: "string" },
       },
     },
     notifications: {
@@ -277,6 +308,13 @@ function isClawrmaConfig(value: unknown): value is ClawrmaConfig {
     return false;
   }
 
+  if (
+    value.webSearchFallback !== undefined &&
+    !isWebSearchFallbackState(value.webSearchFallback)
+  ) {
+    return false;
+  }
+
   if (!isRecord(value.notifications)) {
     return false;
   }
@@ -320,6 +358,25 @@ function isSolverSchedule(value: unknown): boolean {
   return true;
 }
 
+function isWebSearchFallbackState(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  if (
+    !isOneOf(value.status, WEB_SEARCH_FALLBACK_STATUSES) ||
+    !isOneOf(value.method, ["openclaw-managed-web-search", "none"] as const) ||
+    !isBoolean(value.configured) ||
+    !isNullableString(value.selectedProvider) ||
+    !isNullableString(value.preservedProvider) ||
+    !isNullableString(value.replacedProvider)
+  ) {
+    return false;
+  }
+
+  return value.error === undefined || isString(value.error);
+}
+
 function isTaskTypeArray(value: unknown): value is TaskType[] {
   return (
     Array.isArray(value) && value.every((entry) => isOneOf(entry, TASK_TYPES))
@@ -347,6 +404,10 @@ function isBillingTypeArray(value: unknown): value is BillingType[] {
 
 function isString(value: unknown): value is string {
   return typeof value === "string";
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || isString(value);
 }
 
 function isNumber(value: unknown): value is number {

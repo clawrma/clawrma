@@ -122,6 +122,8 @@ function makeOpenClawConfig(agentWorkApiKey: string): OpenClawConfig {
     activeHoursTimezone: null,
     existingSearchConfig: false,
     existingFirecrawlConfig: false,
+    existingClawrmaSearchConfig: false,
+    selectedSearchProvider: null,
   };
 }
 
@@ -1451,6 +1453,7 @@ describe("task convenience commands", () => {
       interactive: true,
       solver: undefined,
       schedule: undefined,
+      webSearchFallback: undefined,
       apiBaseUrl: undefined,
     });
   });
@@ -1466,6 +1469,8 @@ describe("task convenience commands", () => {
       "on",
       "--schedule",
       "overnight",
+      "--web-search-fallback",
+      "yes",
       "--api-base-url",
       "https://staging.clawrma.test",
     ]);
@@ -1475,6 +1480,7 @@ describe("task convenience commands", () => {
       interactive: false,
       solver: "on",
       schedule: "overnight",
+      webSearchFallback: "yes",
       apiBaseUrl: "https://staging.clawrma.test",
     });
   });
@@ -1489,7 +1495,10 @@ describe("task convenience commands", () => {
       (command) => command.name() === "setup",
     );
 
-    expect(authSetupCommand?.helpInformation()).not.toContain("--framework");
+    const help = authSetupCommand?.helpInformation() ?? "";
+    expect(help).toContain("--web-search-fallback");
+    expect(help).not.toContain("--framework");
+    expect(help).not.toContain("--web-fetch-fallback");
   });
 
   it("passes non-interactive setup flags through to runSetup", async () => {
@@ -1511,7 +1520,7 @@ describe("task convenience commands", () => {
       interactive: false,
       solver: "on",
       schedule: "overnight",
-      webFetchFallback: undefined,
+      webSearchFallback: undefined,
       apiBaseUrl: undefined,
     });
   });
@@ -1522,10 +1531,11 @@ describe("task convenience commands", () => {
     const setupCommand = program.commands.find(
       (command) => command.name() === "setup",
     );
+    const help = setupCommand?.helpInformation() ?? "";
 
-    expect(setupCommand?.helpInformation()).not.toContain(
-      ["--provider", "fallback"].join("-"),
-    );
+    expect(help).toContain("--web-search-fallback");
+    expect(help).not.toContain(["--provider", "fallback"].join("-"));
+    expect(help).not.toContain("--web-fetch-fallback");
   });
 
   it("shows both setup paths in top-level help and preserves workflow command order", async () => {

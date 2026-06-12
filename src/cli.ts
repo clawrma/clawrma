@@ -134,6 +134,10 @@ function registerCommands(program: Command, io: CliIo): void {
     .option("--no-interactive", "Force non-interactive setup")
     .option("--solver <on|off>", "Enable or disable solver")
     .option("--schedule <preset>", "Schedule preset")
+    .option(
+      "--web-search-fallback <yes|no>",
+      "Configure managed web search fallback",
+    )
     .option("--api-base-url <url>", "Override API base URL")
     .action(async (options: Record<string, unknown>) => {
       const { runSetup } = await import("./setup.js");
@@ -149,6 +153,10 @@ function registerCommands(program: Command, io: CliIo): void {
           | "custom"
           | "off"
           | undefined,
+        webSearchFallback: options.webSearchFallback as
+          | "yes"
+          | "no"
+          | undefined,
         apiBaseUrl: options.apiBaseUrl as string | undefined,
       });
     });
@@ -163,7 +171,10 @@ function registerCommands(program: Command, io: CliIo): void {
     .option("--no-interactive", "Force non-interactive setup")
     .option("--solver <on|off>", "Enable or disable solver")
     .option("--schedule <preset>", "Schedule preset")
-    .option("--web-fetch-fallback <yes|no>", "Configure web fetch fallback")
+    .option(
+      "--web-search-fallback <yes|no>",
+      "Configure managed web search fallback",
+    )
     .option("--api-base-url <url>", "Override API base URL")
     .action(async (options: Record<string, unknown>) => {
       const { runSetup } = await import("./setup.js");
@@ -188,7 +199,10 @@ function registerCommands(program: Command, io: CliIo): void {
           | "custom"
           | "off"
           | undefined,
-        webFetchFallback: options.webFetchFallback as "yes" | "no" | undefined,
+        webSearchFallback: options.webSearchFallback as
+          | "yes"
+          | "no"
+          | undefined,
         apiBaseUrl: options.apiBaseUrl as string | undefined,
       });
     });

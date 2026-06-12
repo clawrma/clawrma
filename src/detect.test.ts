@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ClawrmaConfig } from "./types.js";
 
@@ -232,6 +235,54 @@ describe("detectCapabilities", () => {
         model_name: "web-search",
       }),
     );
+  });
+
+  it("distinguishes Clawrma managed search from other selected OpenClaw providers", async () => {
+    mockCommandsUnavailable();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new Error("local providers unavailable")),
+    );
+    const home = await mkdtemp(join(tmpdir(), "clawrma-detect-home-"));
+    const configDir = join(home, ".openclaw");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, "openclaw.json"),
+      JSON.stringify(
+        {
+          plugins: {
+            entries: {
+              clawrma: {
+                enabled: true,
+                config: {
+                  webSearch: {
+                    apiBaseUrl: "https://api.clawrma.com",
+                    apiKey: "cr_sk_test",
+                  },
+                },
+              },
+            },
+          },
+          tools: {
+            web: {
+              search: {
+                provider: "brave",
+              },
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    vi.stubEnv("HOME", home);
+
+    const detection = await detectCapabilities("openclaw");
+
+    expect(detection.existingSearchConfig).toBe(true);
+    expect(detection.existingClawrmaSearchConfig).toBe(true);
+    expect(detection.selectedSearchProvider).toBe("brave");
   });
 
   it("keeps browser detection aligned with browser capability advertising", async () => {

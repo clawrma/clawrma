@@ -51,6 +51,8 @@ export async function detectCapabilities(
       activeHours: null,
       existingSearchConfig: listConfiguredBuiltInSearchProviders().length > 0,
       existingFirecrawlConfig: false,
+      existingClawrmaSearchConfig: false,
+      selectedSearchProvider: null,
     };
   }
 
@@ -81,6 +83,9 @@ export async function detectCapabilities(
       openClawConfig?.existingSearchConfig ??
       listConfiguredBuiltInSearchProviders().length > 0,
     existingFirecrawlConfig: openClawConfig?.existingFirecrawlConfig ?? false,
+    existingClawrmaSearchConfig:
+      openClawConfig?.existingClawrmaSearchConfig ?? false,
+    selectedSearchProvider: openClawConfig?.selectedSearchProvider ?? null,
   };
 }
 

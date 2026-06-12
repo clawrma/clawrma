@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0 - 2026-06-12
+
+- **OpenClaw managed web search fallback**: add a package-owned OpenClaw plugin and managed `web_search` provider backed by Clawrma
+- **OpenClaw setup**: install or refresh the Clawrma OpenClaw plugin during setup and inject the managed search fallback configuration
+
 ## 0.2.3 - 2026-05-28
 
 - **OpenClaw config compatibility**: read JSON5 config through OpenClaw's resolver order and use Gateway or CLI patch paths before strict JSON file fallback
